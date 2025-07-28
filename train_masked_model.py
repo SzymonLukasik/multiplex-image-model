@@ -18,6 +18,7 @@ from multiplex_model.data import DatasetFromTIFF, PanelBatchSampler, TestCrop
 from multiplex_model.losses import nll_loss
 from multiplex_model.utils import ClampWithGrad, plot_reconstructs_with_uncertainty, get_scheduler_with_warmup
 from multiplex_model.modules import MultiplexAutoencoder
+from multiplex_model.run_utils import build_run_name_suffix, SLURM_JOB_ID
 
 def train_masked(
         model, 
@@ -50,6 +51,8 @@ def train_masked(
     for epoch in range(start_epoch, epochs):
         model.train()
         for batch_idx, (img, channel_ids, panel_idx, img_path) in enumerate(tqdm(train_dataloader, desc=f'Epoch {epoch}')):
+            # print(f'Processing batch {batch_idx} in epoch {epoch}...')
+            # print(f'Batch size: {img.shape[0]}, Image shape: {img.shape}, Channel IDs shape: {channel_ids.shape}, Panel index: {panel_idx}, Image path: {img_path}')
             batch_size, num_channels, H, W = img.shape
             img = img.to(device, dtype=torch.float32)
             channel_ids = channel_ids.to(device, dtype=torch.long)
@@ -102,12 +105,16 @@ def train_masked(
 
             with autocast(device_type='cuda', dtype=torch.bfloat16):
                 output = model(masked_img, active_channel_ids, channel_ids)['output']
+                # output = model(masked_img, active_channel_ids, active_channel_ids)['output']
                 mi, logsigma = output.unbind(dim=-1)
                 mi = torch.sigmoid(mi)
+                print(f'Mean of mi: {mi.mean().item()}, Mean of logsigma: {logsigma.mean().item()}')
 
                 # Apply ClampWithGrad to logsigma for stability
                 logsigma = ClampWithGrad.apply(logsigma, -15.0, 15.0)
+                # logsigma = torch.tanh(logsigma) * 5.0  # Scale logsigma to a reasonable range
                 loss = nll_loss(img, mi, logsigma)
+                print(loss.item())
 
                 # sanity check if loss is finite
                 if not torch.isfinite(loss):
@@ -350,7 +357,18 @@ if __name__ == '__main__':
         'decoder_config': config['decoder'],
     }
 
-    model = MultiplexAutoencoder(**model_config).to(device)
+    if config["model_type"] == "EquivariantConvnext":
+        from multiplex_model.equivariant_modules import EquivariantMultiplexAutoencoder
+        model = EquivariantMultiplexAutoencoder(**model_config).to(device)
+    elif config["model_type"] == "Convnext":
+        model = MultiplexAutoencoder(**model_config).to(device)
+
+    print(f'Model created with config: {model_config}')
+    print(f'Model has {sum(p.numel() for p in model.parameters() if p.requires_grad)} trainable parameters')
+    print(f'Model: {model}')
+    print(f'Training on {len(train_dataloader.dataset)} training samples and {len(test_dataloader.dataset)} test samples')
+    print(f'Batch size: {BATCH_SIZE}, Number of workers: {NUM_WORKERS}')
+
 
     lr = config['lr']
     final_lr = config['final_lr']
@@ -379,12 +397,19 @@ if __name__ == '__main__':
     spatial_masking_ratio = config['spatial_masking_ratio']
     fully_masked_channels_max_frac = config['fully_masked_channels_max_frac']
     mask_patch_size = config['mask_patch_size']
+    prefix = config.get("run_prefix", "").strip()         # empty by default
+    suffix = build_run_name_suffix()                               # always unique
+    run_name = f"{prefix}_{suffix}" if prefix else suffix
 
     run = neptune.init_run(
+        name=run_name,
         project=secrets['neptune_project'],
         api_token=secrets['neptune_api_token'],
         tags=config['tags'],
     )
+    
+    run["slurm/job_id"] = SLURM_JOB_ID
+    # run["sys/run_name"] = run_name
 
     run["parameters"] = {
         "batch_size": BATCH_SIZE,

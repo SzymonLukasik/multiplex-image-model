@@ -48,6 +48,6 @@ checkpoints_dir: checkpoints
 save_checkpoint_freq: 5
 
 # Neptune logging configuration
-tags: [...]
-neptune_project: ...
-neptune_api_token: ...
+tags: ['ConvNext', 'panel-1 data', 'Gaussian NLL']
+run_prefix: 'Convnext'
+model_type: "Convnext"
