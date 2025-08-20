@@ -164,8 +164,8 @@ def train_masked(
             with autocast(device_type='cuda', dtype=torch.bfloat16):
                 # output = model(masked_img, active_channel_ids, channel_ids)['output']
                 # output = model(masked_img, active_channel_ids, channel_ids)['output'][:, :, 3:-4, 3:-4]
-                output = model(masked_img, active_channel_ids, active_channel_ids)['output'][:, :, 3:-4, 3:-4]
-                # output = model(masked_img, active_channel_ids, active_channel_ids)[0][:, :, 3:-4, 3:-4]
+                # output = model(masked_img, active_channel_ids, active_channel_ids)['output'][:, :, 3:-4, 3:-4]
+                output = model(masked_img, active_channel_ids, active_channel_ids)[0][:, :, 3:-4, 3:-4]
                 # print(f"output shape: {output.shape}")
                 mi, logsigma = output.unbind(dim=-1)
                 mi = torch.sigmoid(mi)
@@ -284,8 +284,8 @@ def test_masked(
 
             # output = model(masked_img, active_channel_ids, channel_ids)['output']
             # output = model(masked_img, active_channel_ids, channel_ids)['output'][:, :, 3:-4, 3:-4]  # Remove padding
-            output = model(masked_img, active_channel_ids, active_channel_ids)['output'][:, :, 3:-4, 3:-4]  # Remove padding
-            # output = model(masked_img, active_channel_ids, active_channel_ids)[0][:, :, 3:-4, 3:-4]  # Remove padding
+            # output = model(masked_img, active_channel_ids, active_channel_ids)['output'][:, :, 3:-4, 3:-4]  # Remove padding
+            output = model(masked_img, active_channel_ids, active_channel_ids)[0][:, :, 3:-4, 3:-4]  # Remove padding
             mi, logsigma = output.unbind(dim=-1)
             mi = torch.sigmoid(mi)
   
@@ -337,17 +337,6 @@ if __name__ == '__main__':
 
     device = config['device']
     print(f'Using device: {device}')
-    
-    prefix = config.get("run_prefix", "").strip()         # empty by default
-    suffix = build_run_name_suffix()                               # always unique
-    run_name = f"{prefix}_{suffix}" if prefix else suffix
-
-    run = neptune.init_run(
-        name=run_name,
-        project=secrets['neptune_project'],
-        api_token=secrets['neptune_api_token'],
-        tags=config['tags'],
-    )
 
     # SIZE = config['input_image_size']
     # print(f"INPUT IMAGE SIZE: {SIZE}")
@@ -364,12 +353,12 @@ if __name__ == '__main__':
     INV_TOKENIZER = {v: k for k, v in TOKENIZER.items()}
 
 
-    model_config = {
-        'num_channels': len(TOKENIZER),
-        'superkernel_config': config['superkernel'],
-        'encoder_config': config['encoder'],
-        'decoder_config': config['decoder'],
-    }
+    # model_config = {
+    #     'num_channels': len(TOKENIZER),
+    #     'superkernel_config': config['superkernel'],
+    #     'encoder_config': config['encoder'],
+    #     'decoder_config': config['decoder'],
+    # }
 
 
     # start of new code 
@@ -406,24 +395,24 @@ if __name__ == '__main__':
 
     # end of new code
 
-    if config["model_type"] == "EquivariantConvnext":
-        from multiplex_model.equivariant_modules import EquivariantMultiplexAutoencoder
-        model = EquivariantMultiplexAutoencoder(**model_config).to(device)
+    # if config["model_type"] == "EquivariantConvnext":
+    #     from multiplex_model.equivariant_modules import EquivariantMultiplexAutoencoder
+    #     model = EquivariantMultiplexAutoencoder(**model_config).to(device)
 
-    elif config["model_type"] == "Convnext":
-        model = MultiplexAutoencoder(**model_config).to(device)
+    # elif config["model_type"] == "Convnext":
+    #     model = MultiplexAutoencoder(**model_config).to(device)
 
-    # from src_from_rudy.models.multiplexvit_no_bottleneck_autoencoder_escnn import EscnnMultiplexVitNoBottleneckAutoencoderModule
-    # autoencoder_module = EscnnMultiplexVitNoBottleneckAutoencoderModule(
-    #     image_size=oldConfig.INPUT_OUTPUT_IMAGE_SHAPE[0],
-    #     channels=oldConfig.CHANNELS,
-    #     hidden_size=oldConfig.HIDDEN_SIZE,
-    #     lr=oldConfig.LR,
-    #     debug_image_log_interval=oldConfig.DEBUG_IMAGE_LOG_INTERVAL,
-    #     loss_function=oldConfig.LOSS_FUNCTION,
-    #     config=config
-    # )
-    # model = autoencoder_module.autoencoder
+    from src_from_rudy.models.multiplexvit_no_bottleneck_autoencoder_escnn import EscnnMultiplexVitNoBottleneckAutoencoderModule
+    autoencoder_module = EscnnMultiplexVitNoBottleneckAutoencoderModule(
+        image_size=oldConfig.INPUT_OUTPUT_IMAGE_SHAPE[0],
+        channels=oldConfig.CHANNELS,
+        hidden_size=oldConfig.HIDDEN_SIZE,
+        lr=oldConfig.LR,
+        debug_image_log_interval=oldConfig.DEBUG_IMAGE_LOG_INTERVAL,
+        loss_function=oldConfig.LOSS_FUNCTION,
+        config=config
+    )
+    model = autoencoder_module.autoencoder
 
     # print(f'Model created with config: {model_config}')
     print(f'Model has {sum(p.numel() for p in model.parameters() if p.requires_grad)} trainable parameters')
@@ -455,6 +444,16 @@ if __name__ == '__main__':
     else:
         start_epoch = 0
 
+    prefix = config.get("run_prefix", "").strip()         # empty by default
+    suffix = build_run_name_suffix()                               # always unique
+    run_name = f"{prefix}_{suffix}" if prefix else suffix
+
+    run = neptune.init_run(
+        name=run_name,
+        project=secrets['neptune_project'],
+        api_token=secrets['neptune_api_token'],
+        tags=config['tags'],
+    )
     
     run["slurm/job_id"] = SLURM_JOB_ID
     # run["sys/run_name"] = run_name

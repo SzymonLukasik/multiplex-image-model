@@ -163,8 +163,8 @@ def train_masked(
 
             with autocast(device_type='cuda', dtype=torch.bfloat16):
                 # output = model(masked_img, active_channel_ids, channel_ids)['output']
-                # output = model(masked_img, active_channel_ids, channel_ids)['output'][:, :, 3:-4, 3:-4]
-                output = model(masked_img, active_channel_ids, active_channel_ids)['output'][:, :, 3:-4, 3:-4]
+                output = model(masked_img, active_channel_ids, channel_ids)['output'][:, :, 3:-4, 3:-4]
+                # output = model(masked_img, active_channel_ids, active_channel_ids)['output'][:, :, 3:-4, 3:-4]
                 # output = model(masked_img, active_channel_ids, active_channel_ids)[0][:, :, 3:-4, 3:-4]
                 # print(f"output shape: {output.shape}")
                 mi, logsigma = output.unbind(dim=-1)
@@ -174,7 +174,7 @@ def train_masked(
                 # Apply ClampWithGrad to logsigma for stability
                 # logsigma = ClampWithGrad.apply(logsigma, -15.0, 15.0)
                 logsigma = torch.tanh(logsigma) * 5.0  # Scale logsigma to a reasonable range
-                loss = nll_loss(masked_img, mi, logsigma)
+                loss = nll_loss(img, mi, logsigma)
                 print(loss.item())
 
                 # sanity check if loss is finite
@@ -200,7 +200,7 @@ def train_masked(
                 run['train/lr'].append(scheduler.get_last_lr()[0])
                 run['train/µ'].append(mi.mean().item())
                 run['train/logvar'].append(logsigma.mean().item())
-                run['train/mae'].append(torch.abs(masked_img - mi).mean().item())
+                run['train/mae'].append(torch.abs(img - mi).mean().item())
         scheduler.step()
 
         val_loss = test_masked(
@@ -283,24 +283,24 @@ def test_masked(
             img = img.to(device)
 
             # output = model(masked_img, active_channel_ids, channel_ids)['output']
-            # output = model(masked_img, active_channel_ids, channel_ids)['output'][:, :, 3:-4, 3:-4]  # Remove padding
-            output = model(masked_img, active_channel_ids, active_channel_ids)['output'][:, :, 3:-4, 3:-4]  # Remove padding
+            output = model(masked_img, active_channel_ids, channel_ids)['output'][:, :, 3:-4, 3:-4]  # Remove padding
+            # output = model(masked_img, active_channel_ids, active_channel_ids)['output'][:, :, 3:-4, 3:-4]  # Remove padding
             # output = model(masked_img, active_channel_ids, active_channel_ids)[0][:, :, 3:-4, 3:-4]  # Remove padding
             mi, logsigma = output.unbind(dim=-1)
             mi = torch.sigmoid(mi)
   
-            loss = nll_loss(masked_img, mi, logsigma)
+            loss = nll_loss(img, mi, logsigma)
             running_loss += loss.item()
-            running_mae += torch.abs(masked_img - mi).mean().item()
+            running_mae += torch.abs(img - mi).mean().item()
 
             if idx in plot_indices:
                 uncertainty_img = torch.exp(logsigma)
-                # unactive_channels = [i for i in channel_ids[0] if i not in active_channel_ids[0]]
-                unactive_channels = []
+                unactive_channels = [i for i in channel_ids[0] if i not in active_channel_ids[0]]
+                # unactive_channels = []
                 masked_channels_names = '\n'.join([marker_names_map[i.item()] for i in unactive_channels])
 
                 reconstr_img = plot_reconstructs_with_uncertainty(
-                    masked_img,
+                    img,
                     mi,
                     uncertainty_img,
                     channel_ids,
