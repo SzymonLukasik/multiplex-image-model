@@ -74,7 +74,6 @@ def train_masked(
                 channel_ids = torch.cat(new_channel_ids, dim=0)
 
 
-<<<<<<< HEAD
             # sample full channels to mask (drop)
             max_channels_to_mask = int(np.ceil(num_sampled_channels * fully_masked_channels_max_frac))
             num_channels_to_mask = np.random.randint(1, max_channels_to_mask + 1)
@@ -105,13 +104,6 @@ def train_masked(
             masked_img = masked_img.view(batch_size, num_active_channels, h, w, mask_patch_size, mask_patch_size)
             masked_img = masked_img.permute(0, 1, 2, 4, 3, 5).contiguous().view(batch_size, num_active_channels, H, W)
                               
-=======
-            img = img.to(device)
-            print(f"img shape {img.shape}")
-            channel_ids = channel_ids.to(device)
-            # print(f"Batch {batch_idx} - Channel IDs: {channel_ids.shape}  Active channel IDs: {active_channel_ids.shape}, Masked image shape: {masked_img.shape}, Image shape: {img.shape}")
-            masked_img = masked_img.to(torch.float32)
->>>>>>> 8b5c32b (Further debug)
 
             with autocast(device_type='cuda', dtype=torch.bfloat16):
                 # output = model(masked_img, active_channel_ids, channel_ids)['output']
@@ -141,11 +133,11 @@ def train_masked(
 
             if (batch_idx+1) % gradient_accumulation_steps == 0:
                 scaler.unscale_(optimizer)
-                # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad()
-                # scheduler.step()
+                scheduler.step()
                 run['train/loss'].append(loss.item())
                 run['train/lr'].append(scheduler.get_last_lr()[0])
                 run['train/µ'].append(mi.mean().item())
@@ -156,11 +148,15 @@ def train_masked(
 =======
                 run['train/mae'].append(torch.abs(masked_img - mi).mean().item())
 <<<<<<< HEAD
+<<<<<<< HEAD
 >>>>>>> 8b5c32b (Further debug)
 
 =======
         scheduler.step()
 >>>>>>> b6676c8 (rudy experiments)
+=======
+        # scheduler.step()
+>>>>>>> d3141a0 (Add recent changes)
 
         val_loss = test_masked(
             model, 
@@ -433,8 +429,8 @@ if __name__ == '__main__':
     scheduler = get_scheduler_with_warmup(optimizer, num_warmup_steps, num_annealing_steps, final_lr=final_lr, base_lr=lr, type='cosine')
 =======
     num_warmup_steps = config['num_warmup_steps']
-    # num_annealing_steps = len(train_dataloader) * epochs // gradient_accumulation_steps - num_warmup_steps
-    num_annealing_steps = config['num_annealing_steps']
+    num_annealing_steps = len(train_dataloader) * epochs // gradient_accumulation_steps - num_warmup_steps
+    # num_annealing_steps = config['num_annealing_steps']
 
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     scheduler = get_scheduler_with_warmup(optimizer, num_warmup_steps, num_annealing_steps, final_lr=final_lr, type='cosine', start_lr=start_lr, lr=lr)
