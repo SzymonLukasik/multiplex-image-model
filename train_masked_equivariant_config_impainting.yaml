@@ -11,13 +11,13 @@ encoder:
     # layers_blocks: [1, 2, 1] - spoko 
     # layers_blocks: [3, 3, 3] # sprawdzmy batch size 2 - spoko 8458MiB
     layers_blocks: [2, 2, 2]
-    embedding_dims: [192, 384, 768] # testing 768
+    embedding_dims: [192, 384, 512] # testing 768
     # embedding_dims: [10, 20, 40]
     # embedding_dims: [100, 200, 400]
     maximum_frequency: 1
 
 decoder:
-  decoded_embed_dim: 768
+  decoded_embed_dim: 512
   num_blocks: 2
 
 # Data configuration
@@ -28,19 +28,19 @@ num_workers: 6
 batch_size: 4
 
 # Training configuration
-device: cuda:1
+device: cuda:0
 lr: 3e-4
 final_lr: 1e-6
 start_lr: 2e-6
 weight_decay: 0.0001
 gradient_accumulation_steps: 1
-epochs: 1501
-num_warmup_steps: 15000 # slight change (was 30000)
+epochs: 200
+num_warmup_steps: 30000
 min_channels_frac: 0.5
 
-from_checkpoint: null
+from_checkpoint: null # /home/szlukasik/immu-vis/multiplex-image-model/checkpoints/checkpoint-EquivariantConvnext_20251001_001136_J2184-epoch_59.pth
 checkpoints_dir: checkpoints
-save_checkpoint_freq: 300
+save_checkpoint_freq: 20
 
 # Neptune logging configuration
 tags: ['ConvNext', 'panel-1 data', 'Gaussian NLL', 'Steerable', 'escnn', 'real tanh scaling', 'impainting', 'real-global_normalize', 'output-trim', 'only-dataset-markers', 'old_loader', 'no-clipping', 'fixed-all-time-warmup', 'no-center-crop-on-training']
