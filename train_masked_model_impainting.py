@@ -306,6 +306,9 @@ if __name__ == '__main__':
 
     train_dataloader = DataLoader(train_dataset, batch_sampler=train_batch_sampler, num_workers=NUM_WORKERS)
     test_dataloader = DataLoader(test_dataset, batch_sampler=test_batch_sampler, num_workers=NUM_WORKERS)
+    
+    print(f'Training on {len(train_dataloader.dataset)} training samples and {len(test_dataloader.dataset)} test samples')
+    print(f'Batch size: {BATCH_SIZE}, Number of workers: {NUM_WORKERS}')
 
     model_config = {
         'num_channels': len(TOKENIZER),
@@ -323,8 +326,6 @@ if __name__ == '__main__':
     print(f'Model created with config: {model_config}')
     print(f'Model has {sum(p.numel() for p in model.parameters() if p.requires_grad)} trainable parameters')
     print(f'Model: {model}')
-    print(f'Training on {len(train_dataloader.dataset)} training samples and {len(test_dataloader.dataset)} test samples')
-    print(f'Batch size: {BATCH_SIZE}, Number of workers: {NUM_WORKERS}')
 
 
     lr = config['lr']
