@@ -209,3 +209,9 @@ __marimo__/
 data/
 venv/
 checkpoints/ 
+
+secrets/
+
+.neptune/
+
+logs/

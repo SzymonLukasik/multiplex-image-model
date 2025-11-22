@@ -11,7 +11,6 @@ from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
 from torchvision.transforms import Compose
 from torchvision.transforms import RandomRotation, RandomCrop
-from torchvision.transforms.functional import InterpolationMode
 from tqdm import tqdm
 import torch.nn.functional as F
 
@@ -49,7 +48,7 @@ def train_masked(
 
     for epoch in range(start_epoch, epochs):
         model.train()
-        for batch_idx, (img, channel_ids, panel_idx, img_path) in enumerate(tqdm(train_dataloader, desc=f'Epoch {epoch}')):
+        for batch_idx, (img, channel_ids, panel_idx, img_path) in enumerate(train_dataloader):
             # print(f'Processing batch {batch_idx} in epoch {epoch}...')
             # print(f'Batch size: {img.shape[0]}, Image shape: {img.shape}, Channel IDs shape: {channel_ids.shape}, Panel index: {panel_idx}, Image path: {img_path}')
             batch_size, num_channels, H, W = img.shape
@@ -80,25 +79,25 @@ def train_masked(
 
 
             img = img.to(device)
-            print(f"img shape {img.shape}")
+            # print(f"img shape {img.shape}")
             channel_ids = channel_ids.to(device)
             # print(f"Batch {batch_idx} - Channel IDs: {channel_ids.shape}  Active channel IDs: {active_channel_ids.shape}, Masked image shape: {masked_img.shape}, Image shape: {img.shape}")
             masked_img = masked_img.to(torch.float32)
 
             with autocast(device_type='cuda', dtype=torch.bfloat16):
                 # output = model(masked_img, active_channel_ids, channel_ids)['output']
-                # output = model(masked_img, active_channel_ids, channel_ids)['output'][:, :, 3:-4, 3:-4]
-                output = model(masked_img, active_channel_ids, active_channel_ids)['output'][:, :, 3:-4, 3:-4]
+                output = model(masked_img, active_channel_ids, channel_ids)['output'][:, :, 3:-4, 3:-4]
+                # output = model(masked_img, active_channel_ids, active_channel_ids)['output'][:, :, 3:-4, 3:-4]
                 # print(f"output shape: {output.shape}")
                 mi, logsigma = output.unbind(dim=-1)
                 mi = torch.sigmoid(mi)
-                print(f'Mean of mi: {mi.mean().item()}, Mean of logsigma: {logsigma.mean().item()}')
+                # print(f'Mean of mi: {mi.mean().item()}, Mean of logsigma: {logsigma.mean().item()}')
 
                 # Apply ClampWithGrad to logsigma for stability
                 # logsigma = ClampWithGrad.apply(logsigma, -15.0, 15.0)
                 logsigma = torch.tanh(logsigma) * 5.0  # Scale logsigma to a reasonable range
-                loss = nll_loss(masked_img, mi, logsigma)
-                print(loss.item())
+                loss = nll_loss(img, mi, logsigma)
+                # print(loss.item())
 
                 # sanity check if loss is finite
                 if not torch.isfinite(loss):
@@ -109,11 +108,10 @@ def train_masked(
                     assert False, "Non-finite loss encountered. Check the model and data."
 
             scaler.scale(loss / gradient_accumulation_steps).backward()
-            # scaler.scale(loss).backward()
 
             if (batch_idx+1) % gradient_accumulation_steps == 0:
                 scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad()
@@ -122,7 +120,7 @@ def train_masked(
                 run['train/lr'].append(scheduler.get_last_lr()[0])
                 run['train/µ'].append(mi.mean().item())
                 run['train/logvar'].append(logsigma.mean().item())
-                run['train/mae'].append(torch.abs(masked_img - mi).mean().item())
+                run['train/mae'].append(torch.abs(img - mi).mean().item())
         # scheduler.step()
 
         val_loss = test_masked(
@@ -134,7 +132,7 @@ def train_masked(
             min_channels_frac=min_channels_frac,
             marker_names_map=marker_names_map,
         )
-        print(f'Validation loss: {val_loss:.4f}')
+        # print(f'Validation loss: {val_loss:.4f}')
 
         if (epoch + 1) % save_checkpoint_every == 0:
             checkpoint = {
@@ -173,7 +171,7 @@ def test_masked(
     plot_indices = set(plot_indices)
     rand_gen = torch.Generator().manual_seed(42)
     with torch.no_grad():
-        for idx, (img, channel_ids, panel_idx, img_path) in enumerate(tqdm(test_dataloader, desc=f'Testing epoch {epoch}')):
+        for idx, (img, channel_ids, panel_idx, img_path) in enumerate(test_dataloader):
             batch_size, num_channels, H, W = img.shape
             min_channels = int(np.ceil(num_channels * min_channels_frac))
             
@@ -201,23 +199,23 @@ def test_masked(
             
 
             # output = model(masked_img, active_channel_ids, channel_ids)['output']
-            # output = model(masked_img, active_channel_ids, channel_ids)['output'][:, :, 3:-4, 3:-4]  # Remove padding
-            output = model(masked_img, active_channel_ids, active_channel_ids)['output'][:, :, 3:-4, 3:-4]  # Remove padding
+            output = model(masked_img, active_channel_ids, channel_ids)['output'][:, :, 3:-4, 3:-4]  # Remove padding
+            # output = model(masked_img, active_channel_ids, active_channel_ids)['output'][:, :, 3:-4, 3:-4]  # Remove padding
             mi, logsigma = output.unbind(dim=-1)
             mi = torch.sigmoid(mi)
   
-            loss = nll_loss(masked_img, mi, logsigma)
+            loss = nll_loss(img, mi, logsigma)
             running_loss += loss.item()
-            running_mae += torch.abs(masked_img - mi).mean().item()
+            running_mae += torch.abs(img - mi).mean().item()
 
             if idx in plot_indices:
                 uncertainty_img = torch.exp(logsigma)
-                # unactive_channels = [i for i in channel_ids[0] if i not in active_channel_ids[0]]
-                unactive_channels = []
+                unactive_channels = [i for i in channel_ids[0] if i not in active_channel_ids[0]]
+                # unactive_channels = []
                 masked_channels_names = '\n'.join([marker_names_map[i.item()] for i in unactive_channels])
 
                 reconstr_img = plot_reconstructs_with_uncertainty(
-                    masked_img,
+                    img,
                     mi,
                     uncertainty_img,
                     channel_ids,
@@ -270,19 +268,17 @@ if __name__ == '__main__':
 
     PANEL_CONFIG = YAML().load(open(config['panel_config']))
     TOKENIZER = YAML().load(open(config['tokenizer_config']))
-    print(f"Training on datasets: {PANEL_CONFIG['datasets']}")
-    MARKERS_SET = {k for dataset in PANEL_CONFIG['datasets'] for k in PANEL_CONFIG['markers'][dataset]}
-    print(f"Markers set: {MARKERS_SET}")
-    print(f"Number of markers: {len(MARKERS_SET)}")
-    TOKENIZER = {k: v for k, v in zip(MARKERS_SET, range(len(MARKERS_SET)))}
+    # print(f"Training on datasets: {PANEL_CONFIG['datasets']}")
+    # MARKERS_SET = {k for dataset in PANEL_CONFIG['datasets'] for k in PANEL_CONFIG['markers'][dataset]}
+    # print(f"Markers set: {MARKERS_SET}")
+    # print(f"Number of markers: {len(MARKERS_SET)}")
+    # TOKENIZER = {k: v for k, v in zip(MARKERS_SET, range(len(MARKERS_SET)))}
     INV_TOKENIZER = {v: k for k, v in TOKENIZER.items()}
 
     train_transform = Compose([
-        RandomRotation(
-            180, 
-            interpolation=InterpolationMode.BILINEAR
-        ),
-        RandomCrop(SIZE),
+        # RandomRotation(180),
+        RandomCrop(SIZE)
+        # TestCrop(SIZE[0]),
     ])
 
     test_transform = TestCrop(SIZE[0])
@@ -293,9 +289,7 @@ if __name__ == '__main__':
         marker_tokenizer=TOKENIZER,
         transform=train_transform,
         use_median_denoising=False,
-        use_butterworth_filter=True,
-        use_minmax_normalization=False,
-        use_clip_normalization=True
+        use_butterworth_filter=True
     )
 
     test_dataset = DatasetFromTIFF(
@@ -304,9 +298,7 @@ if __name__ == '__main__':
         marker_tokenizer=TOKENIZER,
         transform=test_transform,
         use_median_denoising=False,
-        use_butterworth_filter=True,
-        use_minmax_normalization=False,
-        use_clip_normalization=True
+        use_butterworth_filter=True
     )
 
     train_batch_sampler = PanelBatchSampler(train_dataset, BATCH_SIZE)
@@ -314,6 +306,9 @@ if __name__ == '__main__':
 
     train_dataloader = DataLoader(train_dataset, batch_sampler=train_batch_sampler, num_workers=NUM_WORKERS)
     test_dataloader = DataLoader(test_dataset, batch_sampler=test_batch_sampler, num_workers=NUM_WORKERS)
+    
+    print(f'Training on {len(train_dataloader.dataset)} training samples and {len(test_dataloader.dataset)} test samples')
+    print(f'Batch size: {BATCH_SIZE}, Number of workers: {NUM_WORKERS}')
 
     model_config = {
         'num_channels': len(TOKENIZER),
@@ -331,8 +326,6 @@ if __name__ == '__main__':
     print(f'Model created with config: {model_config}')
     print(f'Model has {sum(p.numel() for p in model.parameters() if p.requires_grad)} trainable parameters')
     print(f'Model: {model}')
-    print(f'Training on {len(train_dataloader.dataset)} training samples and {len(test_dataloader.dataset)} test samples')
-    print(f'Batch size: {BATCH_SIZE}, Number of workers: {NUM_WORKERS}')
 
 
     lr = config['lr']
