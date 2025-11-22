@@ -51,6 +51,12 @@ class GRNByIrrep(nn.Module):
             size = r.size
             self.fields.append((slice(start, start+size), size))
             start += size
+        self.n_fields = len(self.fields)
+
+        field_indices = torch.empty(start, dtype=torch.long)
+        for idx, (sl, _) in enumerate(self.fields):
+            field_indices[sl] = idx
+        self.register_buffer("field_indices", field_indices)
 
         # One γ, β per field copy
         self.gamma = nn.Parameter(torch.zeros(1, len(self.fields), 1, 1))
@@ -92,29 +98,24 @@ class GRNByIrrep(nn.Module):
         # ----------------------------------------------------------
         # 1) per-field L2 norm  →  [B, n_fields, 1, 1]
         # ----------------------------------------------------------
-        norms = []
-        # for sl, _ in self.fields:
-        #     # no need to flatten – just reduce across channel & space
-        #     n = torch.linalg.norm(t[:, sl], ord=2, dim=(1, 2, 3), keepdim=True)
-        #     norms.append(n)                         # each n: [B, 1, 1, 1]
-        norms = []
-        for sl, _ in self.fields:
-            n = torch.sqrt((t[:, sl] ** 2).sum(dim=(1, 2, 3), keepdim=True))
-            norms.append(n)                       # [B,1,1,1]
-
-        gx = torch.cat(norms, dim=1)                # [B, n_fields, 1, 1]
+        field_idx = self.field_indices.view(1, C)    # [1, C]
+        channel_sq = t.reshape(B, C, -1).square().sum(dim=2)  # [B, C]
+        gx = channel_sq.new_zeros(B, self.n_fields)  # match dtype to source
+        gx.scatter_add_(1, field_idx.expand(B, -1), channel_sq)
+        gx = torch.sqrt(gx).view(B, self.n_fields, 1, 1)
         nx = gx / (gx.mean(dim=1, keepdim=True) + self.eps)
 
         # ----------------------------------------------------------
         # 2) apply γ, β per field (keep axis 1!)
         # ----------------------------------------------------------
-        out = t.clone()
-        for i, (sl, _) in enumerate(self.fields):
-            gamma_i = self.gamma[:, i:i+1]          # [1,1,1,1]
-            beta_i  = self.beta[:,  i:i+1]          # [1,1,1,1]
-            nx_i    = nx[:,   i:i+1]                # [B,1,1,1]
+        field_idx_c = self.field_indices.view(1, C, 1, 1).expand(B, -1, -1, -1)
+        gamma_expanded = self.gamma.expand(B, -1, -1, -1)
+        beta_expanded = self.beta.expand(B, -1, -1, -1)
+        gamma_per_channel = torch.gather(gamma_expanded, 1, field_idx_c)
+        beta_per_channel = torch.gather(beta_expanded, 1, field_idx_c)
+        nx_per_channel = torch.gather(nx, 1, field_idx_c)
 
-            out[:, sl] = gamma_i * (t[:, sl] * nx_i) + beta_i + t[:, sl]
+        out = t + gamma_per_channel * (t * nx_per_channel) + beta_per_channel
 
         return e2nn.GeometricTensor(out, self.ftype)
 
@@ -479,8 +480,10 @@ class BLConvNeXtBlock(nn.Module):
     def __init__(self,
                  in_type: e2nn.FieldType,
                  expansion: int = 4,
-                 ksize: int = 7):
+                 ksize: int = 7,
+                 use_grn: bool = False,):
         super().__init__()
+        self.use_grn = use_grn
         # initialize=False
         initialize=True
 
@@ -504,7 +507,8 @@ class BLConvNeXtBlock(nn.Module):
 
         self.pw_up   = e2nn.R2Conv(in_type, mid_type, kernel_size=1, bias=True, initialize=initialize)
         self.gelu    = e2nn.NormNonLinearity(mid_type)
-        # self.grn     = GRNByIrrep(mid_type)
+        if use_grn:
+            self.grn     = GRNByIrrep(mid_type)
         self.pw_down = e2nn.R2Conv(mid_type, in_type, kernel_size=1, bias=True, initialize=initialize)
 
         self.in_type  = in_type
@@ -516,7 +520,10 @@ class BLConvNeXtBlock(nn.Module):
 
         y = self.pw_up(y)
         y = self.gelu(y)
-        # y = self.grn(y)
+        print("After GELU: any isnan?", torch.isnan(y.tensor).any(), y.tensor.abs().max(), y.tensor.abs().min(), y.tensor.mean(), y.tensor.std())
+        if self.use_grn:
+            y = self.grn(y)
+        print("After GRN: any isnan?", torch.isnan(y.tensor).any(), y.tensor.abs().max(), y.tensor.abs().min(), y.tensor.mean(), y.tensor.std())
         y = self.pw_down(y)
 
         return x + y
@@ -535,6 +542,7 @@ class EscnnConvNeXtBlocks(nn.Module):
         num_blocks: int = 1,
         ksize: int = 7,
         expansion: int = 4,
+        use_grn: bool = False,
     ):
         super().__init__()
         self.blocks = nn.ModuleList(
@@ -543,6 +551,7 @@ class EscnnConvNeXtBlocks(nn.Module):
                     in_type=in_type,
                     ksize=ksize,
                     expansion=expansion,
+                    use_grn=use_grn,
                 )
                 for _ in range(num_blocks)
             ]
@@ -568,15 +577,18 @@ class EquivariantMultiplexImageEncoder(nn.Module):
         channel_embedding_dim,    # e.g. 96 trivial copies
         include_stem: bool = True,
         maximum_frequency: int = 3,
+        use_grn: bool = False,
+        latent_nonlinearity="arcsinh",
     ):
         super().__init__()
+        self.latent_nonlinearity = latent_nonlinearity
 
         # ───────────────────────────────────────────────────────────────
         # 0.  Group bookkeeping
         # ───────────────────────────────────────────────────────────────
         self.max_freq  = maximum_frequency
         # self.r2_act    = escnn.gspaces.rot2dOnR2(N=-1, maximum_frequency=maximum_frequency)        # SO(2)
-        self.r2_act    = escnn.gspaces.rot2dOnR2(N=-1, maximum_frequency=maximum_frequency)        # SO(2) - axis zero was throwing
+        self.r2_act    = escnn.gspaces.flipRot2dOnR2(N=-1, maximum_frequency=maximum_frequency)        # SO(2) - axis zero was throwing
         # self.r2_act    = e2cnn.gspaces.Rot2dOnR2(N=-1, maximum_frequency=maximum_frequency)        # SO(2)
         self.G: e2cnn.group.groups.O2         = self.r2_act.fibergroup
         bl_repr        = self.G.bl_regular_representation(self.max_freq)  # dim = 1+2*max_freq
@@ -699,6 +711,7 @@ class EquivariantMultiplexImageEncoder(nn.Module):
                 EscnnConvNeXtBlocks(
                     in_type=t,
                     num_blocks=n,
+                    use_grn=use_grn,
                 )
                 for t, n in zip(stage_types, layers_blocks)
             ]
@@ -715,6 +728,14 @@ class EquivariantMultiplexImageEncoder(nn.Module):
     def forward_features(self, x: torch.Tensor) -> torch.Tensor:
         return self.forward(x)
 
+
+    def _postprocess_latent(self, x: torch.Tensor) -> torch.Tensor:
+        if self.latent_nonlinearity == "asinh":
+            return torch.asinh(x)
+        elif self.latent_nonlinearity == "none":
+            return x
+        else:
+            raise ValueError(f"Unknown latent nonlinearity: {self.latent_nonlinearity}")
 
     def forward(self, x: torch.Tensor, return_features: bool = False) -> Dict:
         """Forward pass of the ConvNeXT.
@@ -740,6 +761,7 @@ class EquivariantMultiplexImageEncoder(nn.Module):
             if i == len(self.blocks) - 1:
                 g = self.regular2trivial(g)
                 g = g.tensor  # Extract the raw tensor from GeometricTensor
+                g = self._postprocess_latent(g)
             if return_features:
                 features.append(g)
         # print(f'Latent shape: {g.shape}')
@@ -747,3 +769,5 @@ class EquivariantMultiplexImageEncoder(nn.Module):
         if return_features:
             outputs['features'] = features
         return outputs
+    
+

@@ -1,0 +1,58 @@
+superkernel:
+  embedding_dim: 96
+  num_layers: 0
+  num_heads: null
+  layer_type: linear
+  kernel_size: null
+  mlp_ratio: null
+
+encoder:
+    # layers_blocks: [2, 2, 2]  - spoko batch size 4, nb 2 - 6844MiB 
+    # layers_blocks: [1, 2, 1] - spoko 
+    # layers_blocks: [3, 3, 3] # sprawdzmy batch size 2 - spoko 8458MiB
+    layers_blocks: [2, 2, 2]
+    embedding_dims: [192, 384, 512] # testing 768
+    # embedding_dims: [10, 20, 40]
+    # embedding_dims: [100, 200, 400]
+    maximum_frequency: 1
+    latent_nonlinearity: "asinh"
+
+decoder:
+  decoded_embed_dim: 512
+  num_blocks: 2
+
+# Data configuration
+panel_config: configs/all_panels_config.yaml
+tokenizer_config: configs/all_markers_tokenizer.yaml
+input_image_size: [113, 113]
+num_workers: 6
+batch_size: 8
+
+# Training configuration
+device: cuda:0
+lr: 1.5e-4
+final_lr: 1.5e-4
+start_lr: 2e-6
+weight_decay: 0.0001
+gradient_accumulation_steps: 1
+epochs: 200
+num_warmup_steps: 60000
+# min_channels_frac: 0.5
+min_channels_frac_dict:
+  0: 1.0
+  90000: 0.90
+  135000: 0.80
+  180000: 0.70
+  225000: 0.60
+  270000: 0.50
+
+from_checkpoint:  null #/home/szlukasik/immu-vis/multiplex-image-model/checkpoints/checkpoint-EquivariantConvnext_20251004_191704_J2206-epoch_159.pth #/home/szlukasik/immu-vis/multiplex-image-model/checkpoints/checkpoint-EquivariantConvnext_20251017_162501_J2396-epoch_79.pth  #/raid_encrypted/immucan/models/checkpoint-EquivariantConvnext_20251004_191704_J2206-epoch_179.pth ##/home/szlukasik/immu-vis/multiplex-image-model/checkpoints/checkpoint-EquivariantConvnext_20251015_123509_J2377-epoch_39.pth #checkpoint-EquivariantConvnext_20251011_115438_J2257-epoch_19.pth #checkpoints/checkpoint-EquivariantConvnext_20251001_001136_J2184-epoch_59.pth
+resume_optimizer: false
+resume_scheduler: false
+checkpoints_dir: checkpoints
+save_checkpoint_freq: 20
+
+# Neptune logging configuration
+tags: ['flip-equivariance', 'no-clipping', 'ConvNext', 'larger', 'panel-1 data', 'Gaussian NLL', 'Steerable', 'escnn', 'real tanh scaling', 'impainting', 'real-global_normalize', 'output-trim', 'only-dataset-markers', 'old_loader','fixed-all-time-warmup', 'no-center-crop-on-training']
+run_prefix: 'EquivariantConvnext'
+model_type: "EquivariantConvnext"
