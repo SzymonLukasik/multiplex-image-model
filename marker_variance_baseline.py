@@ -151,6 +151,40 @@ def plot_dataset_metrics(dataset: str, metrics: Dict, out_dir: str, target_r2: f
         plt.close()
 
 
+def plot_non_intersection_variances(dataset: str, metrics: Dict, out_dir: str, max_markers: int = 12) -> None:
+    var_map: Dict[str, List[float]] = metrics.get("non_intersection_var_per_marker", {}) or {}
+    if not var_map:
+        return
+    # Limit to most variable markers to keep legend readable
+    marker_means = [(name, float(np.mean(vals)) if len(vals) > 0 else 0.0) for name, vals in var_map.items()]
+    marker_means.sort(key=lambda x: x[1], reverse=True)
+    selected = [name for name, _ in marker_means[:max_markers]]
+    plt.figure(figsize=(7, 5))
+    for name in selected:
+        vals = var_map.get(name, [])
+        if not vals:
+            continue
+        plt.hist(vals, bins=25, alpha=0.4, label=name)
+    plt.title(f"{dataset}: variance hist (markers outside intersection)")
+    plt.xlabel("Variance across clusters")
+    plt.ylabel("Count")
+    plt.legend(fontsize="small", ncol=2)
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, f"{dataset}_non_intersection_hist.png"), dpi=150)
+    plt.close()
+
+    # Bar plot of mean variance per marker (selected)
+    means = [marker_means[i][1] for i in range(min(len(marker_means), len(selected)))]
+    plt.figure(figsize=(max(6, 0.5 * len(selected)), 4))
+    plt.bar(selected, means, color="#4c78a8")
+    plt.xticks(rotation=45, ha="right")
+    plt.ylabel("Mean variance across clusters")
+    plt.title(f"{dataset}: mean variance per marker (outside intersection)")
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, f"{dataset}_non_intersection_bar.png"), dpi=150)
+    plt.close()
+
+
 def summarise(values: List[float]) -> Dict[str, float]:
     if not values:
         return {"mean": 0.0, "median": 0.0, "std": 0.0, "min": 0.0, "max": 0.0, "count": 0}
@@ -170,6 +204,7 @@ def cluster_and_measure(
     out_feats: Optional[np.ndarray],
     n_clusters: int,
     random_state: int,
+    out_marker_names: Optional[Sequence[str]] = None,
 ) -> Dict:
     n_clusters = min(n_clusters, max(1, intersection_feats.shape[0]))
     model = KMeans(n_clusters=n_clusters, random_state=random_state, n_init="auto")
@@ -178,6 +213,7 @@ def cluster_and_measure(
     r2_per_marker = compute_r2(intersection_feats, labels, centers)
 
     cluster_stats = []
+    out_marker_var: Dict[str, List[float]] = {name: [] for name in (out_marker_names or [])}
     for cluster_id in range(n_clusters):
         mask = labels == cluster_id
         if not np.any(mask):
@@ -186,6 +222,11 @@ def cluster_and_measure(
         out_var = None
         if out_feats is not None and out_feats.shape[1] > 0:
             out_var = float(np.mean(np.var(out_feats[mask], axis=0)))
+            if out_marker_names:
+                var_per_marker = np.var(out_feats[mask], axis=0)
+                for idx, name in enumerate(out_marker_names):
+                    if idx < var_per_marker.shape[0]:
+                        out_marker_var[name].append(float(var_per_marker[idx]))
         cluster_stats.append(
             {
                 "cluster": int(cluster_id),
@@ -204,6 +245,7 @@ def cluster_and_measure(
         "non_intersection_var_summary": summarise([
             c["non_intersection_var_mean"] for c in cluster_stats if c["non_intersection_var_mean"] is not None
         ]),
+        "non_intersection_var_per_marker": out_marker_var if out_marker_var else {},
     }
 
 
@@ -374,6 +416,7 @@ def compute_marker_variance_baseline(
             out_feats=out_feats,
             n_clusters=n_clusters,
             random_state=seed,
+            out_marker_names=non_intersection,
         )
         metrics.update(
             {
@@ -453,6 +496,7 @@ def main() -> None:
         os.makedirs(args.figures_dir, exist_ok=True)
         for ds_name, metrics in results.items():
             plot_dataset_metrics(ds_name, metrics, args.figures_dir, target_r2=args.target_r2, entity_name=entity_name)
+            plot_non_intersection_variances(ds_name, metrics, args.figures_dir)
 
     payload = {
         "config": {
