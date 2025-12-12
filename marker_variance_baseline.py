@@ -448,7 +448,7 @@ def compute_marker_variance_baseline(
     split: str = "test",
     crop_size: Optional[int] = None,
     datasets: Optional[Sequence[str]] = None,
-    n_clusters: int = 1000,
+    n_clusters: Sequence[int] = (1000,),
     target_r2: float = 0.1,
     max_pixels: Optional[int] = 500_000,
     max_pixels_per_image: Optional[int] = 50_000,
@@ -461,12 +461,14 @@ def compute_marker_variance_baseline(
     mask_folder: str = "masks",
     max_images_per_dataset: Optional[int] = None,
     debug_logging: bool = False,
-) -> Dict[str, Dict]:
+) -> Dict[int, Dict[str, Dict]]:
+    n_clusters_list = list(n_clusters)
     rng = np.random.default_rng(seed)
     panel_config = load_yaml(panel_config_path)
     tokenizer = load_yaml(tokenizer_path)
     datasets_to_use = datasets or panel_config.get("datasets", [])
-    results: Dict[str, Dict] = {}
+    dataset_features: Dict[str, Dict[str, np.ndarray]] = {}
+    dataset_meta: Dict[str, Dict[str, any]] = {}
 
     for dataset_name in tqdm(datasets_to_use):
         if dataset_name == "nsclc2-panel1":
@@ -530,30 +532,49 @@ def compute_marker_variance_baseline(
             inter_feats = inter_feats[keep]
             if out_feats is not None and out_feats.shape[0] > 0:
                 out_feats = out_feats[keep]
-        metrics = cluster_and_measure(
-            intersection_feats=inter_feats,
-            out_feats=out_feats,
-            n_clusters=n_clusters,
-            random_state=seed,
-            out_marker_names=non_intersection,
-            debug_logging=debug_logging,
-        )
-        metrics.update(
-            {
-                "dataset": dataset_name,
-                "intersection_markers": intersection,
-                "non_intersection_markers": non_intersection,
-                "evaluation_mode": evaluation_mode,
-                "n_entities_used": int(inter_feats.shape[0]),
-                "n_images_used": int(n_images_used),
-                "n_images_with_masks": int(images_with_masks),
-                "n_cells_considered": int(entities_count) if evaluation_mode == "cell" else None,
-                "target_r2": target_r2,
-                "hit_target_r2": metrics["r2_summary"]["mean"] <= target_r2,
-            }
-        )
-        results[dataset_name] = metrics
-    return results
+        dataset_features[dataset_name] = {"inter": inter_feats, "out": out_feats}
+        dataset_meta[dataset_name] = {
+            "intersection": intersection,
+            "non_intersection": non_intersection,
+            "evaluation_mode": evaluation_mode,
+            "n_entities_used": int(inter_feats.shape[0]),
+            "n_images_used": int(n_images_used),
+            "n_images_with_masks": int(images_with_masks),
+            "n_cells_considered": int(entities_count) if evaluation_mode == "cell" else None,
+        }
+
+    print(f"Collected features for {len(dataset_features)} datasets. Starting clustering and measurements...")
+    results_by_k: Dict[int, Dict[str, Dict]] = {}
+    for k in n_clusters_list:
+        per_dataset: Dict[str, Dict] = {}
+        for dataset_name, feats in dataset_features.items():
+            metrics = cluster_and_measure(
+                intersection_feats=feats["inter"],
+                out_feats=feats["out"],
+                n_clusters=k,
+                random_state=seed,
+                out_marker_names=dataset_meta[dataset_name]["non_intersection"],
+                debug_logging=debug_logging,
+            )
+            meta = dataset_meta[dataset_name]
+            metrics.update(
+                {
+                    "dataset": dataset_name,
+                    "intersection_markers": meta["intersection"],
+                    "non_intersection_markers": meta["non_intersection"],
+                    "evaluation_mode": meta["evaluation_mode"],
+                    "n_entities_used": meta["n_entities_used"],
+                    "n_images_used": meta["n_images_used"],
+                    "n_images_with_masks": meta["n_images_with_masks"],
+                    "n_cells_considered": meta["n_cells_considered"],
+                    "target_r2": target_r2,
+                    "hit_target_r2": metrics["r2_summary"]["mean"] <= target_r2,
+                    "n_clusters_used": k,
+                }
+            )
+            per_dataset[dataset_name] = metrics
+        results_by_k[k] = per_dataset
+    return results_by_k
 
 
 def build_marker_stats_rows(results: Dict[str, Dict]) -> List[Dict]:
@@ -1142,7 +1163,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--datasets", nargs="*", default=None, help="Optional subset of datasets to process.")
     parser.add_argument("--crop-size", type=int, default=None, help="Optional center crop size.")
     parser.add_argument("--no-crop", action="store_true", help="Do not apply center crop (overrides crop-size/config).")
-    parser.add_argument("--n-clusters", type=int, default=1000, help="KMeans cluster count (default: 1000).")
+    parser.add_argument(
+        "--n-clusters",
+        type=int,
+        nargs="+",
+        default=[1000],
+        help="KMeans cluster count(s). Provide multiple to compute metrics for each (default: 1000).",
+    )
     parser.add_argument("--target-r2", type=float, default=0.1, help="Target mean R^2 threshold for intersection markers.")
     parser.add_argument("--max-pixels", type=int, default=None, help="Global pixel cap per dataset (after stacking).")
     parser.add_argument("--max-pixels-per-image", type=int, default=None, help="Per-image pixel cap before stacking.")
@@ -1215,7 +1242,7 @@ def main() -> None:
               f"\n  mask_folder: {args.mask_folder}"
               f"\n  max_images_per_dataset: {args.max_images_per_dataset}")
 
-        results = compute_marker_variance_baseline(
+        results_by_k = compute_marker_variance_baseline(
             panel_config_path=panel_config_path,
             tokenizer_path=tokenizer_path,
             split=args.split,
@@ -1235,7 +1262,6 @@ def main() -> None:
             max_images_per_dataset=args.max_images_per_dataset,
             debug_logging=args.debug_cluster_logging,
         )
-        n_clusters = args.n_clusters
         target_r2 = args.target_r2
         use_butterworth = not args.disable_butterworth
         use_median = args.enable_median_denoising
@@ -1247,61 +1273,79 @@ def main() -> None:
         split = args.split
         mask_folder = args.mask_folder
 
-    total_images = sum(v.get("n_images_used", 0) for v in results.values())
-    total_entities = sum(v.get("n_entities_used", 0) for v in results.values())
-    entity_name = "pixels" if mode == "pixel" else "cells"
+    # Normalize results structure to {k: {dataset: metrics}}
+    if args.results_path:
+        if results and all(isinstance(k, (int, float)) or str(k).isdigit() for k in results.keys()):
+            results_by_k = {int(k): v for k, v in results.items()}
+        else:
+            stored_k = results.get(next(iter(results)))["n_clusters_used"] if results else args.n_clusters[0]
+            results_by_k = {stored_k: results}
 
-    if args.figures_dir:
-        os.makedirs(args.figures_dir, exist_ok=True)
-        for ds_name, metrics in results.items():
-            plot_dataset_metrics(ds_name, metrics, args.figures_dir, target_r2=target_r2, entity_name=entity_name)
-            plot_non_intersection_variances(ds_name, metrics, args.figures_dir)
+    base_output = args.output
+    base_stats = args.stats_csv
+    output_root, output_ext = os.path.splitext(base_output)
+    stats_root, stats_ext = (os.path.splitext(base_stats) if base_stats else (None, None))
 
-    # Build per-marker stats dataframe (outside markers)
-    stats_rows = build_marker_stats_rows(results)
-    if args.stats_csv:
-        pd.DataFrame(stats_rows).to_csv(args.stats_csv, index=False)
-        print(f"Saved marker stats to {args.stats_csv}")
+    for k, results in results_by_k.items():
+        total_images = sum(v.get("n_images_used", 0) for v in results.values())
+        total_entities = sum(v.get("n_entities_used", 0) for v in results.values())
+        entity_name = "pixels" if mode == "pixel" else "cells"
 
-    # Combined bar plot across datasets for outside markers
-    if args.figures_dir and stats_rows:
-        df_stats = pd.DataFrame(stats_rows)
-        save_combined_marker_barplot(df_stats, args.figures_dir)
-        save_marker_dataset_heatmap(df_stats, args.figures_dir)
-        save_marker_variance_vs_r2_scatter(df_stats, args.figures_dir)
-        save_combined_relative_variance_barplot(df_stats, args.figures_dir)
+        figures_dir = None
+        if args.figures_dir:
+            figures_dir = os.path.join(args.figures_dir, f"k_{k}")
+            os.makedirs(figures_dir, exist_ok=True)
+            for ds_name, metrics in results.items():
+                plot_dataset_metrics(ds_name, metrics, figures_dir, target_r2=target_r2, entity_name=entity_name)
+                plot_non_intersection_variances(ds_name, metrics, figures_dir)
 
-    payload = {
-        "config": {
-            "config_path": os.path.abspath(args.config) if args.config else None,
-            "panel_config": os.path.abspath(panel_config_path) if panel_config_path else None,
-            "tokenizer_config": os.path.abspath(tokenizer_path) if tokenizer_path else None,
-            "split": split,
-            "crop_size": crop_size,
-            "n_clusters": n_clusters,
-            "target_r2": target_r2,
-            "max_pixels": max_pixels,
-            "max_pixels_per_image": max_pixels_per_image,
-            "max_images_per_dataset": max_images_per_dataset,
-            "mode": mode,
-            "mask_folder": mask_folder,
-            "use_butterworth": use_butterworth,
-            "use_median": use_median,
-            "use_minmax": use_minmax,
-        },
-        "summary": {
-            "total_datasets": len(results),
-            "total_images_used": total_images,
-            "total_entities_used": total_entities,
-            "entity_name": entity_name,
-        },
-        "results": results,
-    }
+        stats_rows = build_marker_stats_rows(results)
+        if base_stats:
+            stats_path = f"{stats_root}_k_{k}{stats_ext}"
+            pd.DataFrame(stats_rows).to_csv(stats_path, index=False)
+            print(f"[k={k}] Saved marker stats to {stats_path}")
 
-    with open(args.output, "w") as handle:
-        json.dump(payload, handle, indent=2)
-    print(f"Saved variance baseline metrics for {len(results)} dataset(s) to {args.output}")
-    print(f"Total images used: {total_images}, total {entity_name}: {total_entities}")
+        if figures_dir and stats_rows:
+            df_stats = pd.DataFrame(stats_rows)
+            save_combined_marker_barplot(df_stats, figures_dir)
+            save_marker_dataset_heatmap(df_stats, figures_dir)
+            save_marker_variance_vs_r2_scatter(df_stats, figures_dir)
+            save_combined_relative_variance_barplot(df_stats, figures_dir)
+
+        payload = {
+            "config": {
+                "config_path": os.path.abspath(args.config) if args.config else None,
+                "panel_config": os.path.abspath(panel_config_path) if panel_config_path else None,
+                "tokenizer_config": os.path.abspath(tokenizer_path) if tokenizer_path else None,
+                "split": split,
+                "crop_size": crop_size,
+                "n_clusters": k,
+                "target_r2": target_r2,
+                "max_pixels": max_pixels,
+                "max_pixels_per_image": max_pixels_per_image,
+                "max_images_per_dataset": max_images_per_dataset,
+                "mode": mode,
+                "mask_folder": mask_folder,
+                "use_butterworth": use_butterworth,
+                "use_median": use_median,
+                "use_minmax": use_minmax,
+            },
+            "summary": {
+                "total_datasets": len(results),
+                "total_images_used": total_images,
+                "total_entities_used": total_entities,
+                "entity_name": entity_name,
+            },
+            "results": results,
+        }
+
+        out_path = base_output
+        if len(results_by_k) > 1:
+            out_path = f"{output_root}_k_{k}{output_ext}"
+        with open(out_path, "w") as handle:
+            json.dump(payload, handle, indent=2)
+        print(f"[k={k}] Saved variance baseline metrics for {len(results)} dataset(s) to {out_path}")
+        print(f"[k={k}] Total images used: {total_images}, total {entity_name}: {total_entities}")
 
 
 if __name__ == "__main__":
