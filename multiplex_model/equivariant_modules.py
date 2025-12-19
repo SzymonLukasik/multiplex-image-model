@@ -29,7 +29,7 @@ from torch.nn import functional as F
 import escnn.nn as e2nn
 import escnn
 
-from multiplex_model.modules import Superkernel, MultiplexImageDecoder
+from multiplex_model.modules import Hyperkernel, MultiplexImageDecoder
 
 
 class GRNByIrrep(nn.Module):
@@ -122,128 +122,222 @@ class GRNByIrrep(nn.Module):
 
 # logging.basicConfig(level=logging.DEBUG)
 
-class EquivariantMultiplexAutoencoderOld(nn.Module):
-    """Multiplex image Transformer with Superkernel and Multiplex Image Decoder."""
+# class EquivariantMultiplexAutoencoderOld(nn.Module):
+#     """Multiplex image Transformer with Superkernel and Multiplex Image Decoder."""
+
+#     def __init__(
+#             self, 
+#             num_channels: int,
+#             input_image_size: int,
+#             superkernel_embedding_dim: int,
+#             superkernel_depth: int,
+#             superkernel_heads: int,
+#             superkernel_layer_type: Literal['conv', 'linear'],
+#             encoder_config: Dict,
+#             decoder_config: Dict,
+#             superkernel_kernel_size: int = None,
+#             superkernel_conv_padding: int = None,
+#             superkernel_conv_stride: int = 1,
+#             mlp_ratio: float = 4.,
+#             **kwargs
+#             ):
+#         """Initialize the Multiplex Transformer model.
+
+#         Args:
+#             num_channels (int): Number of channels/markers in the dataset.
+#             input_image_size (int): Size of the input image.
+#             superkernel_embedding_dim (int): Embedding dimension for the Superkernel.
+#             superkernel_depth (int): Number of layers in the Superkernel model.
+#             superkernel_heads (int): Number of heads per channel embedding in the Superkernel model.
+#             superkernel_layer_type (Literal['conv', 'linear']): Type of the Superkernel layer.
+#             encoder_config (Dict): Configuration for the encoder.
+#             decoder_config (Dict): Configuration for the decoder.
+#             superkernel_kernel_size (int, optional): Size of Superkernel kernel if conv type. Defaults to None.
+#             superkernel_conv_padding (int, optional): Convolution padding if conv type. Defaults to None.
+#             superkernel_conv_stride (int, optional): Convolution stride if conv type. Defaults to 1.
+#             mlp_ratio (float, optional): MLP ratio. Defaults to 4..
+#         """
+#         super().__init__()
+#         self.num_channels = num_channels
+#         self.input_image_size = input_image_size
+#         self.superkernel_embedding_dim = superkernel_embedding_dim
+#         self.superkernel_depth = superkernel_depth
+#         self.superkernel_heads = superkernel_heads
+#         self.superkernel_layer_type = superkernel_layer_type
+#         self.superkernel_kernel_size = superkernel_kernel_size
+#         self.superkernel_conv_padding = superkernel_conv_padding
+#         self.superkernel_conv_stride = superkernel_conv_stride
+#         self.mlp_ratio = mlp_ratio
+
+
+#         self.superkernel = Superkernel(
+#             num_channels=num_channels, 
+#             embedding_dim=superkernel_embedding_dim, 
+#             num_layers=superkernel_depth, 
+#             num_heads=superkernel_heads, 
+#             mlp_ratio=mlp_ratio, 
+#             layer_type=superkernel_layer_type,
+#             kernel_size=superkernel_kernel_size,
+#             **kwargs
+#         )
+#         self.act = nn.GELU()
+
+#         self.encoder = EscnnMultiplexImageEncoder(
+#             **encoder_config
+#         )
+
+#         self.decoder = MultiplexImageDecoder(
+#             **decoder_config
+#         )
+
+#     def forward(
+#             self, 
+#             x: torch.Tensor, 
+#             encoded_indices: torch.Tensor, 
+#             decoded_indices: torch.Tensor
+#         ) -> torch.Tensor:
+#         # print("shape", x.shape)
+#         B = x.shape[0]
+#         # print(f'Input shape: {x.shape}, Encoded indices shape: {encoded_indices.shape}, Decoded indices shape: {decoded_indices.shape}')
+#         # print((f"Input isnan: {torch.isnan(x).any()}, "))
+#         # print((f"Encoded indices isnan: {torch.isnan(encoded_indices).any()}, "))
+#         # print((f"Decoded indices isnan: {torch.isnan(decoded_indices).any()}, "))
+#         superkernel_weights = self.superkernel(encoded_indices)
+
+
+#         # print((f"Superkernel weights isnan: {torch.isnan(superkernel_weights).any()}, "))
+#         if self.superkernel_layer_type == 'conv':
+#             x = torch.cat([
+#                 F.conv2d(
+#                     x[i].unsqueeze(0), 
+#                     superkernel_weights[i].to(x.dtype), 
+#                     padding=self.superkernel_conv_padding,
+#                     stride=self.superkernel_conv_stride
+#                 )
+#                 for i in range(B)
+#             ])
+            
+#         else:
+#             x = torch.einsum('bchw, bce -> behw', x, superkernel_weights.to(x.dtype))
+
+#         # print(f'After superkernel shape: {x.shape}')
+#         # print((f"After superkernel isnan: {torch.isnan(x).any()}, "))
+#         x = self.act(x)
+
+#         # print(f'After activation shape: {x.shape}')
+#         # print((f"After activation isnan: {torch.isnan(x).any()}, "))
+#         x = self.encoder(x)
+#         # print(f"latent isnan: {torch.isnan(x).any()}")
+
+#         # print(f'After encoder shape: {x.shape}')
+#         # print((f"After encoder isnan: {torch.isnan(x).any()}, "))
+#         latent = x
+#         # print(f'Latent shape: {latent.shape}')
+#         # latent, features = x[:, 0], x[:, 1:]
+#         # latent = x.mean(dim=(2, 3))
+#         # x = features.permute(0, 2, 1).reshape(B, 768, 14, 14)
+
+#         x = self.decoder(x, decoded_indices)
+#         # x = x[:, :, ]
+        
+#         # print(f"decoded isnan: {torch.isnan(x).any()}")
+#         # print(f'After decoder shape: {x.shape}')
+#         # print((f"After decoder isnan: {torch.isnan(x).any()}, "))        
+#         return x, latent
+
+
+class EquivariantMultiplexImageEncoder(nn.Module):
+    """Encoder backbone for encoding multiplex images."""
 
     def __init__(
-            self, 
+            self,
             num_channels: int,
-            input_image_size: int,
-            superkernel_embedding_dim: int,
-            superkernel_depth: int,
-            superkernel_heads: int,
-            superkernel_layer_type: Literal['conv', 'linear'],
-            encoder_config: Dict,
-            decoder_config: Dict,
-            superkernel_kernel_size: int = None,
-            superkernel_conv_padding: int = None,
-            superkernel_conv_stride: int = 1,
-            mlp_ratio: float = 4.,
-            **kwargs
-            ):
-        """Initialize the Multiplex Transformer model.
+            ma_layers_blocks,
+            ma_embedding_dims,
+            hyperkernel_config,
+            pm_layers_blocks,
+            pm_embedding_dims,
+            maximum_frequency,
+            include_stem,
+            latent_nonlinearity,
+    ):
+        """Initialize the Multiplex Image Encoder.
 
         Args:
-            num_channels (int): Number of channels/markers in the dataset.
-            input_image_size (int): Size of the input image.
-            superkernel_embedding_dim (int): Embedding dimension for the Superkernel.
-            superkernel_depth (int): Number of layers in the Superkernel model.
-            superkernel_heads (int): Number of heads per channel embedding in the Superkernel model.
-            superkernel_layer_type (Literal['conv', 'linear']): Type of the Superkernel layer.
-            encoder_config (Dict): Configuration for the encoder.
-            decoder_config (Dict): Configuration for the decoder.
-            superkernel_kernel_size (int, optional): Size of Superkernel kernel if conv type. Defaults to None.
-            superkernel_conv_padding (int, optional): Convolution padding if conv type. Defaults to None.
-            superkernel_conv_stride (int, optional): Convolution stride if conv type. Defaults to 1.
-            mlp_ratio (float, optional): MLP ratio. Defaults to 4..
+            num_channels (int): Number of all possible channels/markers.
+            ma_layers_blocks (List[int]): Number of blocks in each marker-agnostic layer.
+            ma_embedding_dims (List[int]): Embedding dimensions for each marker-agnostic layer.
+            hyperkernel_config (Dict): Configuration for the hyperkernel.
+            pm_layers_blocks (List[int]): Number of blocks in each pan-marker layer.
+            pm_embedding_dims (List[int]): Embedding dimensions for each pan-marker layer.
         """
         super().__init__()
-        self.num_channels = num_channels
-        self.input_image_size = input_image_size
-        self.superkernel_embedding_dim = superkernel_embedding_dim
-        self.superkernel_depth = superkernel_depth
-        self.superkernel_heads = superkernel_heads
-        self.superkernel_layer_type = superkernel_layer_type
-        self.superkernel_kernel_size = superkernel_kernel_size
-        self.superkernel_conv_padding = superkernel_conv_padding
-        self.superkernel_conv_stride = superkernel_conv_stride
-        self.mlp_ratio = mlp_ratio
 
-
-        self.superkernel = Superkernel(
-            num_channels=num_channels, 
-            embedding_dim=superkernel_embedding_dim, 
-            num_layers=superkernel_depth, 
-            num_heads=superkernel_heads, 
-            mlp_ratio=mlp_ratio, 
-            layer_type=superkernel_layer_type,
-            kernel_size=superkernel_kernel_size,
-            **kwargs
+        # channel-agnostic part
+        self.marker_agnostic_encoder = EquivariantConvNeXtEncoder(
+            input_channels=1,
+            layers_blocks=ma_layers_blocks,
+            embedding_dims=ma_embedding_dims,
+            maximum_frequency=maximum_frequency,
+            include_stem=include_stem,
+            latent_nonlinearity=latent_nonlinearity,
         )
+
+        self.hyperkernel = Hyperkernel(
+            num_channels=num_channels,
+            input_dim=ma_embedding_dims[-1],
+            module_type='encoder',
+            **hyperkernel_config
+        )
+
         self.act = nn.GELU()
 
-        self.encoder = EscnnMultiplexImageEncoder(
-            **encoder_config
+        # pan-marker part
+        self.pan_marker_encoder = EquivariantConvNeXtEncoder(
+            input_channels=self.hyperkernel.embedding_dim,
+            layers_blocks=pm_layers_blocks,
+            embedding_dims=pm_embedding_dims,
+            include_stem=include_stem,
+            maximum_frequency=maximum_frequency,
+            latent_nonlinearity=latent_nonlinearity,
         )
 
-        self.decoder = MultiplexImageDecoder(
-            **decoder_config
-        )
+    def forward(self, x: torch.Tensor, encoded_indices: torch.Tensor, return_features: bool = False) -> Dict:
+        """Forward pass of the encoder.
 
-    def forward(
-            self, 
-            x: torch.Tensor, 
-            encoded_indices: torch.Tensor, 
-            decoded_indices: torch.Tensor
-        ) -> torch.Tensor:
-        # print("shape", x.shape)
-        B = x.shape[0]
-        # print(f'Input shape: {x.shape}, Encoded indices shape: {encoded_indices.shape}, Decoded indices shape: {decoded_indices.shape}')
-        # print((f"Input isnan: {torch.isnan(x).any()}, "))
-        # print((f"Encoded indices isnan: {torch.isnan(encoded_indices).any()}, "))
-        # print((f"Decoded indices isnan: {torch.isnan(decoded_indices).any()}, "))
-        superkernel_weights = self.superkernel(encoded_indices)
+        Args:
+            x (torch.Tensor): Multiplex images batch tensor with shape [B, C, H, W]
+            encoded_indices (torch.Tensor): Indices of the markers in channels tensor with shape [B, C].
+            return_features (bool, optional): If True, returns the features after each block. Defaults to False.
 
-
-        # print((f"Superkernel weights isnan: {torch.isnan(superkernel_weights).any()}, "))
-        if self.superkernel_layer_type == 'conv':
-            x = torch.cat([
-                F.conv2d(
-                    x[i].unsqueeze(0), 
-                    superkernel_weights[i].to(x.dtype), 
-                    padding=self.superkernel_conv_padding,
-                    stride=self.superkernel_conv_stride
-                )
-                for i in range(B)
-            ])
-            
-        else:
-            x = torch.einsum('bchw, bce -> behw', x, superkernel_weights.to(x.dtype))
-
-        # print(f'After superkernel shape: {x.shape}')
-        # print((f"After superkernel isnan: {torch.isnan(x).any()}, "))
-        x = self.act(x)
-
-        # print(f'After activation shape: {x.shape}')
-        # print((f"After activation isnan: {torch.isnan(x).any()}, "))
-        x = self.encoder(x)
-        # print(f"latent isnan: {torch.isnan(x).any()}")
-
-        # print(f'After encoder shape: {x.shape}')
-        # print((f"After encoder isnan: {torch.isnan(x).any()}, "))
-        latent = x
-        # print(f'Latent shape: {latent.shape}')
-        # latent, features = x[:, 0], x[:, 1:]
-        # latent = x.mean(dim=(2, 3))
-        # x = features.permute(0, 2, 1).reshape(B, 768, 14, 14)
-
-        x = self.decoder(x, decoded_indices)
-        # x = x[:, :, ]
+        Returns:
+            Dict: A dictionary containing the output tensor and optionally the features.
+        """
+        outputs = {}
+        features = []
         
-        # print(f"decoded isnan: {torch.isnan(x).any()}")
-        # print(f'After decoder shape: {x.shape}')
-        # print((f"After decoder isnan: {torch.isnan(x).any()}, "))        
-        return x, latent
+        B, C, H, W = x.shape
+        x = x.reshape(B * C, 1, H, W)
+        x = self.marker_agnostic_encoder(x, return_features=return_features)
+        if return_features:
+            features += x['features']
+        x = x['output']
+        _, E_ma, H_ma, W_ma = x.shape
+        x = x.reshape(B, C, E_ma, H_ma, W_ma).reshape(B, C * E_ma, H_ma, W_ma)
+
+        x = self.hyperkernel(x, encoded_indices)
+        
+        x = self.act(x)
+        x = self.pan_marker_encoder(x, return_features=return_features)
+        if return_features:
+            features += x['features']
+        x = x['output']
+
+        outputs['output'] = x
+        if return_features:
+            outputs['features'] = features
+
+        return outputs
 
 
 class EquivariantMultiplexAutoencoder(nn.Module):
@@ -252,7 +346,6 @@ class EquivariantMultiplexAutoencoder(nn.Module):
     def __init__(
             self,
             num_channels: int,
-            superkernel_config: Dict,
             encoder_config: Dict,
             decoder_config: Dict,
             ):
@@ -265,19 +358,11 @@ class EquivariantMultiplexAutoencoder(nn.Module):
             decoder_config (Dict): Configuration for the decoder.
         """
         super().__init__()
-        self.superkernel_dim = superkernel_config['embedding_dim']
-        self.latent_dim = encoder_config['embedding_dims'][-1]
-        self.decoder_dim = decoder_config['decoded_embed_dim']
+        self.latent_dim = encoder_config['pm_embedding_dims'][-1]
+        # self.decoder_dim = decoder_config['decoded_embed_dim']
         self.num_channels = num_channels
-        self.superkernel_conv_padding = (superkernel_config.get('kernel_size') or 0) // 2
-        self.superkernel_conv_stride = superkernel_config.get('stride', 1)
-
+  
         self.act = nn.GELU()
-
-        self.superkernel = Superkernel(
-            num_channels=self.num_channels,
-            **superkernel_config
-        )
 
         # self.pixel_shift_superkernel = Superkernel(
         #     num_channels=self.num_channels,
@@ -290,12 +375,12 @@ class EquivariantMultiplexAutoencoder(nn.Module):
         # )
 
         self.encoder = EquivariantMultiplexImageEncoder( # finish thi
-            channel_embedding_dim=self.superkernel_dim,
+            num_channels=self.num_channels,
             # num_all_channels=self.num_channels,
             **encoder_config
         )
 
-        scaling_factor = 2 ** len(encoder_config['layers_blocks'])
+        scaling_factor = 2 ** len(encoder_config['ma_layers_blocks'] + encoder_config['pm_layers_blocks'])
         self.decoder = MultiplexImageDecoder(
             input_embedding_dim=self.latent_dim,
             scaling_factor=scaling_factor,
@@ -303,50 +388,6 @@ class EquivariantMultiplexAutoencoder(nn.Module):
             **decoder_config
         )
 
-    def embed_images(
-            self, 
-            x: torch.Tensor, 
-            encoded_indices: torch.Tensor,
-            return_features: bool = False,
-        ) -> Dict:
-        """Embed the input images using the superkernel.
-
-        Args:
-            x (torch.Tensor): Input images tensor with shape (B, C, H, W).
-            encoded_indices (torch.Tensor): Indices of the markers in channels.
-            return_features (bool, optional): If True, returns the superkernel weights. Defaults to False.
-
-        Returns:
-            Dict: A dictionary containing the embedded images tensor (under 'output') and optionally the superkernel weights.
-        """
-        B, C = x.shape[0], x.shape[1]
-        superkernel_weights = self.superkernel(encoded_indices)
-        # pixel_shift_weights = self.pixel_shift_superkernel(encoded_indices)
-
-        # pixel_shift_weights = pixel_shift_weights.reshape(B, C, 1, 1)
-        # x = x + pixel_shift_weights
-        # print(f'Input shape: {x.shape}, Encoded indices shape: {encoded_indices.shape}')
-
-        # print(f'Superkernel weights shape: {superkernel_weights.shape}')
-        if self.superkernel.layer_type == 'conv':
-            x = torch.cat([
-                F.conv2d(
-                    x[i].unsqueeze(0), 
-                    superkernel_weights[i].to(x.dtype), 
-                    padding=self.superkernel_conv_padding,
-                    stride=self.superkernel_conv_stride
-                )
-                for i in range(B)
-            ])
-            
-        else:
-            x = torch.einsum('bchw, bce -> behw', x, superkernel_weights.to(x.dtype))
-        
-        x = self.act(x)
-        outputs = {'output': x}
-        if return_features:
-            outputs['features'] = [superkernel_weights]
-        return outputs
 
     def encode_images(
             self, 
@@ -364,14 +405,12 @@ class EquivariantMultiplexAutoencoder(nn.Module):
         Returns:
             Dict: A dictionary containing the encoded images tensor (under 'output') and optionally the features.
         """
-        embedding_output = self.embed_images(x, encoded_indices, return_features=return_features)
-        x = embedding_output['output']
-        encoding_output = self.encoder(x, return_features=return_features)
+        encoding_output = self.encoder(x, encoded_indices=encoded_indices, return_features=return_features)
         outputs = {'output': encoding_output['output']}
         # print(f'Encoding output shape: {outputs["output"].shape}')
 
         if return_features:
-            outputs['features'] = embedding_output['features'] + encoding_output['features']
+            outputs['features'] = encoding_output['features']
         return outputs
 
     def decode_images(
@@ -520,10 +559,8 @@ class BLConvNeXtBlock(nn.Module):
 
         y = self.pw_up(y)
         y = self.gelu(y)
-        print("After GELU: any isnan?", torch.isnan(y.tensor).any(), y.tensor.abs().max(), y.tensor.abs().min(), y.tensor.mean(), y.tensor.std())
         if self.use_grn:
             y = self.grn(y)
-        print("After GRN: any isnan?", torch.isnan(y.tensor).any(), y.tensor.abs().max(), y.tensor.abs().min(), y.tensor.mean(), y.tensor.std())
         y = self.pw_down(y)
 
         return x + y
@@ -564,7 +601,7 @@ class EscnnConvNeXtBlocks(nn.Module):
         return x
     
 
-class EquivariantMultiplexImageEncoder(nn.Module):
+class EquivariantConvNeXtEncoder(nn.Module):
     r"""
     *Input*  : B × C_in × H × W  (plain tensor, **C_in = `channel_embedding_dim`**)  
     *Output* : GeometricTensor whose FieldType is the last stage’s one.
@@ -572,13 +609,14 @@ class EquivariantMultiplexImageEncoder(nn.Module):
 
     def __init__(
         self,
+        input_channels,
         layers_blocks,            # e.g. [2, 2, 2]
         embedding_dims,           # e.g. [192, 384, 768]  ← **must** be multiples of (1+2*max_freq)
-        channel_embedding_dim,    # e.g. 96 trivial copies
+        # channel_embedding_dim,    # e.g. 96 trivial copies
         include_stem: bool = True,
         maximum_frequency: int = 3,
         use_grn: bool = False,
-        latent_nonlinearity="arcsinh",
+        latent_nonlinearity="none",
     ):
         super().__init__()
         self.latent_nonlinearity = latent_nonlinearity
@@ -612,7 +650,7 @@ class EquivariantMultiplexImageEncoder(nn.Module):
             return e2nn.FieldType(self.r2_act, reps)
 
         self.input_type = e2nn.FieldType(
-            self.r2_act, [self.r2_act.trivial_repr] * channel_embedding_dim
+            self.r2_act, [self.r2_act.trivial_repr] * input_channels
         )
 
         stage_types = [_make_stage_type(d) for d in embedding_dims]
@@ -678,15 +716,17 @@ class EquivariantMultiplexImageEncoder(nn.Module):
                     #     ),
                     #     # CropRightBottom(out_type, cropright=1, cropbottom=1)  if idx > 0 else nn.Identity()
                     # )
-                    e2nn.R2Conv(
-                        prev_type, out_type,
-                        kernel_size=3, # was 3x3
-                        stride=2,
-                        padding=1, # change wrt 74, 75
-                        bias=True,
-                        initialize=True, # TODO: set to True if you want to initialize
+                    nn.Sequential(
+                        e2nn.R2Conv(
+                            prev_type, out_type,
+                            kernel_size=3, # was 3x3
+                            stride=2,
+                            padding=1, # change wrt 74, 75
+                            bias=True,
+                            initialize=True, # TODO: set to True if you want to initialize
+                        ),
+                        e2nn.FieldNorm(out_type, eps=1e-5, affine=True)
                     )
-                    
                     # this is what the 74, and 75 versions had
                     # e2nn.R2Conv(
                     #     prev_type, out_type,
@@ -730,44 +770,40 @@ class EquivariantMultiplexImageEncoder(nn.Module):
 
 
     def _postprocess_latent(self, x: torch.Tensor) -> torch.Tensor:
-        if self.latent_nonlinearity == "asinh":
+        if self.latent_nonlinearity in ("asinh", "arcsinh"):
             return torch.asinh(x)
         elif self.latent_nonlinearity == "none":
             return x
         else:
             raise ValueError(f"Unknown latent nonlinearity: {self.latent_nonlinearity}")
 
-    def forward(self, x: torch.Tensor, return_features: bool = False) -> Dict:
-        """Forward pass of the ConvNeXT.
-
-        Args:
-            x (torch.Tensor): Multiplex images batch tensor with shape [B, C, H, W]
-            return_features (bool, optional): If True, returns the features after each block. Defaults to False.
-
-        Returns:
-            Dict: A dictionary containing the output tensor and optionally the features.
-        """
+    def _forward_impl(self, x: torch.Tensor, return_features: bool = False) -> Dict:
         outputs = {}
         features = []
+
         g = e2nn.GeometricTensor(x, self.input_type)
         for i, (pool, act, blk) in enumerate(zip(self.poolings, self.acts, self.blocks)):
-            pooled = pool(g)
-            # print(f"After pooling: {pooled.tensor.shape}, type: {pooled.type}")
-            # print(f"Pooling type: {type(pool)}")
-            # print(f"Activation in type: {act.in_type}")
-            g = act(pooled)
-            # print(f"After pooling: {g.tensor.shape}, type: {g.type}")
+            g = act(pool(g))
             g = blk(g)
             if i == len(self.blocks) - 1:
                 g = self.regular2trivial(g)
                 g = g.tensor  # Extract the raw tensor from GeometricTensor
-                g = self._postprocess_latent(g)
+                # g = self._postprocess_latent(g)
             if return_features:
                 features.append(g)
-        # print(f'Latent shape: {g.shape}')
-        outputs['output'] = g
-        if return_features:
-            outputs['features'] = features
-        return outputs
-    
 
+        outputs["output"] = g
+        if return_features:
+            outputs["features"] = features
+        return outputs
+
+    def forward(self, x: torch.Tensor, return_features: bool = False) -> Dict:
+        # NOTE: ESCNN expands bias via a matmul (`bias_expansion @ bias`).
+        # Under AMP (bfloat16), this can produce a bf16 bias while the input stays fp32,
+        # which then crashes in conv2d with "Input type (float) and bias type (BFloat16)".
+        # Run the equivariant encoder in full precision when autocast is enabled.
+        if x.is_cuda and torch.is_autocast_enabled():
+            with torch.autocast(device_type="cuda", enabled=False):
+                return self._forward_impl(x.float(), return_features=return_features)
+        return self._forward_impl(x, return_features=return_features)
+    

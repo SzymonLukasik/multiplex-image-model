@@ -106,19 +106,13 @@ def train_masked(
                               
 
             with autocast(device_type='cuda', dtype=torch.bfloat16):
-                # output = model(masked_img, active_channel_ids, channel_ids)['output']
-                # output = model(masked_img, active_channel_ids, channel_ids)['output'][:, :, 3:-4, 3:-4]
-                output = model(masked_img, active_channel_ids, active_channel_ids)['output'][:, :, 3:-4, 3:-4]
-                # print(f"output shape: {output.shape}")
+                output = model(masked_img, active_channel_ids, channel_ids)['output']
                 mi, logsigma = output.unbind(dim=-1)
                 mi = torch.sigmoid(mi)
-                print(f'Mean of mi: {mi.mean().item()}, Mean of logsigma: {logsigma.mean().item()}')
 
                 # Apply ClampWithGrad to logsigma for stability
-                # logsigma = ClampWithGrad.apply(logsigma, -15.0, 15.0)
-                logsigma = torch.tanh(logsigma) * 5.0  # Scale logsigma to a reasonable range
-                loss = nll_loss(masked_img, mi, logsigma)
-                print(loss.item())
+                logsigma = ClampWithGrad.apply(logsigma, -15.0, 15.0)
+                loss = nll_loss(img, mi, logsigma)
 
                 # sanity check if loss is finite
                 if not torch.isfinite(loss):
@@ -142,21 +136,8 @@ def train_masked(
                 run['train/lr'].append(scheduler.get_last_lr()[0])
                 run['train/µ'].append(mi.mean().item())
                 run['train/logvar'].append(logsigma.mean().item())
-<<<<<<< HEAD
                 run['train/mae'].append(torch.abs(img - mi).mean().item())
                 run['train/mse'].append(torch.square(img - mi).mean().item())
-=======
-                run['train/mae'].append(torch.abs(masked_img - mi).mean().item())
-<<<<<<< HEAD
-<<<<<<< HEAD
->>>>>>> 8b5c32b (Further debug)
-
-=======
-        scheduler.step()
->>>>>>> b6676c8 (rudy experiments)
-=======
-        # scheduler.step()
->>>>>>> d3141a0 (Add recent changes)
 
         val_loss = test_masked(
             model, 
@@ -246,35 +227,25 @@ def test_masked(
             # fold back to image
             masked_img = masked_img.view(batch_size, num_active_channels, h, w, mask_patch_size, mask_patch_size)
             masked_img = masked_img.permute(0, 1, 2, 4, 3, 5).contiguous().view(batch_size, num_active_channels, H, W)
-            channel_ids = channel_ids.to(device)
-            masked_img = masked_img.to(torch.float32)
-            img = img.to(device)
-            
 
-            # output = model(masked_img, active_channel_ids, channel_ids)['output']
-            # output = model(masked_img, active_channel_ids, channel_ids)['output'][:, :, 3:-4, 3:-4]  # Remove padding
-            output = model(masked_img, active_channel_ids, active_channel_ids)['output'][:, :, 3:-4, 3:-4]  # Remove padding
+            output = model(masked_img, active_channel_ids, channel_ids)['output']
             mi, logsigma = output.unbind(dim=-1)
             mi = torch.sigmoid(mi)
   
-            loss = nll_loss(masked_img, mi, logsigma)
+            logsigma = ClampWithGrad.apply(logsigma, -15.0, 15.0)
+            loss = nll_loss(img, mi, logsigma)
             running_loss += loss.item()
-<<<<<<< HEAD
             running_mae += torch.abs(img - mi).mean().item()
             running_mse += torch.square(img - mi).mean().item()
-=======
-            running_mae += torch.abs(masked_img - mi).mean().item()
->>>>>>> 8b5c32b (Further debug)
 
             if idx in plot_indices:
                 uncertainty_img = torch.exp(logsigma)
-                # unactive_channels = [i for i in channel_ids[0] if i not in active_channel_ids[0]]
-                unactive_channels = []
+                unactive_channels = [i for i in channel_ids[0] if i not in active_channel_ids[0]]
                 masked_channels_names = '\n'.join([marker_names_map[i.item()] for i in unactive_channels])
                 partially_masked_ids = active_channel_ids[0].tolist()
 
                 reconstr_img = plot_reconstructs_with_uncertainty(
-                    masked_img,
+                    img,
                     mi,
                     uncertainty_img,
                     channel_ids,
@@ -415,26 +386,25 @@ if __name__ == '__main__':
 
     lr = config['lr']
     final_lr = config['final_lr']
-    start_lr = config.get('start_lr', None)
     weight_decay = config['weight_decay']
     gradient_accumulation_steps = config['gradient_accumulation_steps']
     epochs = config['epochs']
-<<<<<<< HEAD
-    frac_warmup_steps = config['frac_warmup_steps']
     total_steps = len(train_dataloader) * epochs // gradient_accumulation_steps
-    num_warmup_steps = int(total_steps * frac_warmup_steps)
+    if 'frac_warmup_steps' in config:
+        num_warmup_steps = int(total_steps * float(config['frac_warmup_steps']))
+    else:
+        num_warmup_steps = int(config['num_warmup_steps'])
     num_annealing_steps = total_steps - num_warmup_steps
 
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-    scheduler = get_scheduler_with_warmup(optimizer, num_warmup_steps, num_annealing_steps, final_lr=final_lr, base_lr=lr, type='cosine')
-=======
-    num_warmup_steps = config['num_warmup_steps']
-    num_annealing_steps = len(train_dataloader) * epochs // gradient_accumulation_steps - num_warmup_steps
-    # num_annealing_steps = config['num_annealing_steps']
-
-    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-    scheduler = get_scheduler_with_warmup(optimizer, num_warmup_steps, num_annealing_steps, final_lr=final_lr, type='cosine', start_lr=start_lr, lr=lr)
->>>>>>> b6676c8 (rudy experiments)
+    scheduler = get_scheduler_with_warmup(
+        optimizer,
+        num_warmup_steps,
+        num_annealing_steps,
+        final_lr=final_lr,
+        base_lr=lr,
+        type='cosine',
+    )
 
     if 'from_checkpoint' in config and config['from_checkpoint']:
         print(f'Loading model from checkpoint: {config["from_checkpoint"]}')
@@ -446,23 +416,10 @@ if __name__ == '__main__':
     else:
         start_epoch = 0
 
-<<<<<<< HEAD
-    min_channels_frac = config['min_channels_frac']
-    spatial_masking_ratio = config['spatial_masking_ratio']
-    fully_masked_channels_max_frac = config['fully_masked_channels_max_frac']
-    mask_patch_size = config['mask_patch_size']
-    prefix = config.get("run_prefix", "").strip()         # empty by default
-    suffix = build_run_name_suffix()                               # always unique
-    run_name = f"{prefix}_{suffix}" if prefix else suffix
-
-    run = neptune.init_run(
-        name=run_name,
-        project=secrets['neptune_project'],
-        api_token=secrets['neptune_api_token'],
-        tags=config['tags'],
-    )
-=======
->>>>>>> b6676c8 (rudy experiments)
+    min_channels_frac = config.get('min_channels_frac', 0.75)
+    spatial_masking_ratio = config.get('spatial_masking_ratio', 0.6)
+    fully_masked_channels_max_frac = config.get('fully_masked_channels_max_frac', 0.5)
+    mask_patch_size = config.get('mask_patch_size', 8)
     
     run["slurm/job_id"] = SLURM_JOB_ID
     # run["sys/run_name"] = run_name
