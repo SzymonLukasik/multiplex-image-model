@@ -1,4 +1,4 @@
-import e2cnn.group.groups
+# import e2cnn.group.groups
 
 import torch
 
@@ -628,7 +628,7 @@ class EquivariantConvNeXtEncoder(nn.Module):
         # self.r2_act    = escnn.gspaces.rot2dOnR2(N=-1, maximum_frequency=maximum_frequency)        # SO(2)
         self.r2_act    = escnn.gspaces.flipRot2dOnR2(N=-1, maximum_frequency=maximum_frequency)        # SO(2) - axis zero was throwing
         # self.r2_act    = e2cnn.gspaces.Rot2dOnR2(N=-1, maximum_frequency=maximum_frequency)        # SO(2)
-        self.G: e2cnn.group.groups.O2         = self.r2_act.fibergroup
+        self.G        = self.r2_act.fibergroup
         bl_repr        = self.G.bl_regular_representation(self.max_freq)  # dim = 1+2*max_freq
         # irreps = [self.G.irrep(0)] + [self.G.irrep(k) for k in range(1, self.max_freq + 1)]
         # bl_repr = directsum(irreps, name=f"bl_reg_{self.max_freq}")
