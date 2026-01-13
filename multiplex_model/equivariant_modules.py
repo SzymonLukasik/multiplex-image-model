@@ -31,6 +31,123 @@ import escnn
 
 from multiplex_model.modules import Hyperkernel, MultiplexImageDecoder
 
+import torch
+import torch.nn as nn
+import escnn.nn as e2nn
+
+
+class EquivariantPixelLN(nn.Module):
+    """
+    LN-ish normalization for irrep-split FieldTypes:
+
+    - computes per-field magnitude m_f(b,h,w) = ||x_f(b,h,w)||_2 over irrep components
+    - s(b,h,w) = mean_f m_f(b,h,w)
+    - rescales each field: x_f <- x_f / (s + eps)
+
+    Optional:
+    - center_trivial: subtract per-pixel mean across *trivial scalar fields only*
+    - affine: learn one gamma per field (equivariant) and beta only for trivial scalar fields
+    """
+    def __init__(
+        self,
+        in_type: e2nn.FieldType,
+        eps: float = 1e-6,
+        center_trivial: bool = True,
+        affine: bool = True,
+    ):
+        super().__init__()
+        self.in_type = in_type
+        self.out_type = in_type
+        self.eps = eps
+        self.center_trivial = center_trivial
+        self.affine = affine
+
+        # Precompute slices for each field in the concatenated tensor
+        self._fields = []  # list of dicts: {start, end, size, is_trivial, trivial_idx}
+        start = 0
+        trivial_field_indices = []
+        for i, r in enumerate(in_type.representations):
+            size = r.size
+            end = start + size
+            is_trivial = (r == in_type.gspace.trivial_repr)  # true trivial 1D scalar
+            if is_trivial:
+                trivial_field_indices.append(i)
+            self._fields.append(
+                dict(start=start, end=end, size=size, is_trivial=is_trivial)
+            )
+            start = end
+
+        self.n_fields = len(self._fields)
+        self.trivial_field_indices = trivial_field_indices
+        self.n_trivial = len(trivial_field_indices)
+
+        if affine:
+            # One gamma per field copy; applies to all components inside the field (equivariant).
+            self.gamma = nn.Parameter(torch.ones(self.n_fields))
+            # Beta only for trivial scalar fields (equivariant).
+            if self.n_trivial > 0:
+                self.beta_trivial = nn.Parameter(torch.zeros(self.n_trivial))
+            else:
+                self.beta_trivial = None
+
+    def forward(self, x: e2nn.GeometricTensor) -> e2nn.GeometricTensor:
+        xt = x.tensor  # [B, C, H, W]
+        B, C, H, W = xt.shape
+
+        # Work on a copy because we may center trivial scalars
+        y = xt
+
+        # 1) Optional: center ONLY trivial scalar fields per pixel
+        if self.center_trivial and self.n_trivial > 0:
+            # gather trivial scalars into [B, n_trivial, H, W]
+            triv = []
+            for fi in self.trivial_field_indices:
+                f = self._fields[fi]
+                # size is 1 for trivial repr
+                triv.append(y[:, f["start"]:f["end"], :, :])
+            triv_stack = torch.cat(triv, dim=1)  # [B, n_trivial, H, W]
+            triv_mean = triv_stack.mean(dim=1, keepdim=True)  # [B, 1, H, W]
+
+            # subtract mean from each trivial scalar channel
+            y = y.clone()
+            for fi in self.trivial_field_indices:
+                f = self._fields[fi]
+                y[:, f["start"]:f["end"], :, :] -= triv_mean
+
+        # 2) Compute per-pixel scale s(b,h,w) = mean_f ||field_f||_2
+        # Do it as a running sum to avoid stacking huge tensors.
+        sum_mag = None
+        for f in self._fields:
+            sl = y[:, f["start"]:f["end"], :, :]  # [B, size, H, W]
+            if f["size"] == 1:
+                mag = sl.abs()  # [B, 1, H, W]
+            else:
+                # L2 norm across irrep components (size dimension)
+                mag = torch.linalg.vector_norm(sl, ord=2, dim=1, keepdim=True)  # [B,1,H,W]
+
+            sum_mag = mag if sum_mag is None else (sum_mag + mag)
+
+        s = sum_mag / float(self.n_fields)  # [B, 1, H, W]
+        denom = s + self.eps
+
+        # 3) Rescale each field by the same per-pixel scalar denom
+        out = y.clone()
+        for i, f in enumerate(self._fields):
+            sl = out[:, f["start"]:f["end"], :, :]  # [B, size, H, W]
+            sl = sl / denom
+
+            # 4) Optional equivariant affine
+            if self.affine:
+                sl = sl * self.gamma[i]
+                if f["is_trivial"] and self.beta_trivial is not None:
+                    # map i -> trivial index
+                    t_idx = self.trivial_field_indices.index(i)
+                    sl = sl + self.beta_trivial[t_idx]
+
+            out[:, f["start"]:f["end"], :, :] = sl
+
+        return e2nn.GeometricTensor(out, self.out_type)
+
 
 class GRNByIrrep(nn.Module):
     """
@@ -260,6 +377,11 @@ class EquivariantMultiplexImageEncoder(nn.Module):
             maximum_frequency,
             include_stem,
             latent_nonlinearity,
+            use_gating: bool = True,
+            use_layerscale: bool = True,
+            layerscale_init: float = 1e-6,
+            gate_bias_init: float = 1.0,
+            pool_use_act: bool = True,
     ):
         """Initialize the Multiplex Image Encoder.
 
@@ -279,8 +401,12 @@ class EquivariantMultiplexImageEncoder(nn.Module):
             layers_blocks=ma_layers_blocks,
             embedding_dims=ma_embedding_dims,
             maximum_frequency=maximum_frequency,
-            include_stem=include_stem,
             latent_nonlinearity=latent_nonlinearity,
+            use_gating=use_gating,
+            use_layerscale=use_layerscale,
+            layerscale_init=layerscale_init,
+            gate_bias_init=gate_bias_init,
+            pool_use_act=pool_use_act,
         )
 
         self.hyperkernel = Hyperkernel(
@@ -297,9 +423,14 @@ class EquivariantMultiplexImageEncoder(nn.Module):
             input_channels=self.hyperkernel.embedding_dim,
             layers_blocks=pm_layers_blocks,
             embedding_dims=pm_embedding_dims,
-            include_stem=include_stem,
+            include_stem=False,
             maximum_frequency=maximum_frequency,
             latent_nonlinearity=latent_nonlinearity,
+            use_gating=use_gating,
+            use_layerscale=use_layerscale,
+            layerscale_init=layerscale_init,
+            gate_bias_init=gate_bias_init,
+            pool_use_act=pool_use_act,
         )
 
     def forward(self, x: torch.Tensor, encoded_indices: torch.Tensor, return_features: bool = False) -> Dict:
@@ -514,19 +645,87 @@ class Regular2Trivial(nn.Module):
     def forward(self, x: e2nn.GeometricTensor):
         return self.proj(x)
 
+def apply_bank_gate(mid_feat: e2nn.GeometricTensor, gate: torch.Tensor, repr_dim: int) -> e2nn.GeometricTensor:
+    """
+    mid_feat: GeometricTensor with FieldType = [bl_repr] * (exp*K)
+             tensor shape [B, (exp*K*repr_dim), H, W]
+    gate:    raw tensor shape [B, exp*K, H, W] (trivial scalars)
+    repr_dim: bl_repr.size
+
+    returns: GeometricTensor same type as mid_feat
+    """
+    ft = mid_feat.tensor
+    B, C, H, W = ft.shape
+    assert C % repr_dim == 0
+    n_banks = C // repr_dim  # exp*K
+
+    g = torch.sigmoid(gate).view(B, n_banks, 1, H, W)  # [B, n_banks, 1, H, W]
+    ft = ft.view(B, n_banks, repr_dim, H, W) * g
+    ft = ft.view(B, n_banks * repr_dim, H, W)
+
+    return e2nn.GeometricTensor(ft, mid_feat.type)
+
+class FieldLayerScale(nn.Module):
+    """
+    Equivariant LayerScale: one scalar per *field copy* (uniform across irrep components).
+    """
+    def __init__(self, ftype: e2nn.FieldType, init_value: float = 1e-6):
+        super().__init__()
+        self.ftype = ftype
+
+        # build field_indices: for each channel, which field it belongs to
+        start = 0
+        fields = []
+        for r in ftype:
+            size = r.size
+            fields.append((slice(start, start+size), size))
+            start += size
+
+        field_indices = torch.empty(start, dtype=torch.long)
+        for idx, (sl, _) in enumerate(fields):
+            field_indices[sl] = idx
+        self.register_buffer("field_indices", field_indices)
+        self.n_fields = len(fields)
+
+        # gamma per field
+        self.gamma = nn.Parameter(init_value * torch.ones(1, self.n_fields, 1, 1))
+
+    def forward(self, x: e2nn.GeometricTensor) -> e2nn.GeometricTensor:
+        t = x.tensor  # [B, C, H, W]
+        B, C, H, W = t.shape
+
+        idx = self.field_indices.view(1, C, 1, 1).expand(B, -1, -1, -1)
+        gamma = self.gamma.expand(B, -1, -1, -1)
+        gamma_per_channel = torch.gather(gamma, 1, idx)
+
+        return e2nn.GeometricTensor(t * gamma_per_channel, x.type)
+
 
 class BLConvNeXtBlock(nn.Module):
     def __init__(self,
                  in_type: e2nn.FieldType,
                  expansion: int = 4,
                  ksize: int = 7,
-                 use_grn: bool = False,):
+                 use_grn: bool = False,
+        use_gating: bool = True,
+        use_layerscale: bool = True,
+        layerscale_init: float = 1e-6,
+        gate_bias_init: float = 1.0,   # >0 starts gates ~open
+    ):
         super().__init__()
+
         self.use_grn = use_grn
+        self.use_gating = use_gating
+        self.use_layerscale = use_layerscale
+
         # initialize=False
         initialize=True
 
         gspace = in_type.gspace
+        K = len(in_type)   
+        repr_dim = in_type.representations[0].size
+        self._repr_dim = repr_dim
+
         # For the point-wise MLP we keep the same irrep set but multiply the copies
         mid_type = e2nn.FieldType(
             gspace,
@@ -538,30 +737,73 @@ class BLConvNeXtBlock(nn.Module):
         self.depthwise = e2nn.R2Conv(
             in_type, in_type,
             kernel_size=ksize, padding=ksize//2, bias=True,
+            # groups=len(in_type.representations) // bank_length,
+            groups=K,
             initialize=initialize
         )
 
-        self.norm = e2nn.IIDBatchNorm2d(in_type, affine=True)
+
+        # self.norm = EquivariantPixelLN(
+        #     in_type,
+        #     eps=1e-6,
+        #     center_trivial=True,   # matches “center only trivial scalars”
+        #     affine=True,
+        # )
+        # self.norm = e2nn.IIDBatchNorm2d(in_type, affine=True, track_running_stats=False)
+        # self.norm = e2nn.FieldNorm(in_type, eps=1e-6, affine=True)
         # self.norm = e2nn.GNormBatchNorm(in_type, affine=True)
+        
+        mid_feat_type = e2nn.FieldType(gspace, list(in_type.representations) * expansion)
+        self.mid_feat_type = mid_feat_type
 
-        self.pw_up   = e2nn.R2Conv(in_type, mid_type, kernel_size=1, bias=True, initialize=initialize)
-        self.gelu    = e2nn.NormNonLinearity(mid_type)
+        assert len({r.size for r in in_type.representations}) == 1
+        assert len({r.size for r in self.mid_feat_type.representations}) == 1
+
+
+        self.pw_up_feat = e2nn.R2Conv(in_type, mid_feat_type, kernel_size=1, bias=True, initialize=True)
+        self.act = e2nn.NormNonLinearity(mid_feat_type)
+
+        # 4) gates: one trivial scalar per expanded bank
+        if use_gating:
+            gate_type = e2nn.FieldType(gspace, [gspace.trivial_repr] * (expansion * K))
+            self.pw_up_gate = e2nn.R2Conv(in_type, gate_type, kernel_size=1, bias=True, initialize=True)
+
+            # initialize gate bias so sigmoid ~ open at start
+            if getattr(self.pw_up_gate, "bias", None) is not None and self.pw_up_gate.bias is not None:
+                with torch.no_grad():
+                    self.pw_up_gate.bias.fill_(gate_bias_init)
+
+        # 5) optional GRN
         if use_grn:
-            self.grn     = GRNByIrrep(mid_type)
-        self.pw_down = e2nn.R2Conv(mid_type, in_type, kernel_size=1, bias=True, initialize=initialize)
+            self.grn = GRNByIrrep(mid_feat_type)
 
+        # 6) project back
+        self.pw_down = e2nn.R2Conv(mid_feat_type, in_type, kernel_size=1, bias=True, initialize=True)
+
+        # 7) optional LayerScale
+        if use_layerscale:
+            self.ls = FieldLayerScale(in_type, init_value=layerscale_init)
         self.in_type  = in_type
         self.out_type = in_type
 
     def forward(self, x: e2nn.GeometricTensor):
         y = self.depthwise(x)
-        y = self.norm(y)
+        # y = self.norm(y)
 
-        y = self.pw_up(y)
-        y = self.gelu(y)
+        feat = self.pw_up_feat(y)
+        feat = self.act(feat)
+
         if self.use_grn:
-            y = self.grn(y)
-        y = self.pw_down(y)
+            feat = self.grn(feat)
+
+        if self.use_gating:
+            gate = self.pw_up_gate(y).tensor  # [B, exp*K, H, W]
+            feat = apply_bank_gate(feat, gate, repr_dim=self._repr_dim)
+
+        y = self.pw_down(feat)
+
+        if self.use_layerscale:
+            y = self.ls(y)
 
         return x + y
 
@@ -580,6 +822,10 @@ class EscnnConvNeXtBlocks(nn.Module):
         ksize: int = 7,
         expansion: int = 4,
         use_grn: bool = False,
+        use_gating: bool = True,
+        use_layerscale: bool = True,
+        layerscale_init: float = 1e-6,
+        gate_bias_init: float = 1.0,
     ):
         super().__init__()
         self.blocks = nn.ModuleList(
@@ -589,6 +835,10 @@ class EscnnConvNeXtBlocks(nn.Module):
                     ksize=ksize,
                     expansion=expansion,
                     use_grn=use_grn,
+                    use_gating=use_gating,
+                    use_layerscale=use_layerscale,
+                    layerscale_init=layerscale_init,
+                    gate_bias_init=gate_bias_init,
                 )
                 for _ in range(num_blocks)
             ]
@@ -616,10 +866,16 @@ class EquivariantConvNeXtEncoder(nn.Module):
         include_stem: bool = True,
         maximum_frequency: int = 3,
         use_grn: bool = False,
+        use_gating: bool = True,
+        use_layerscale: bool = True,
+        layerscale_init: float = 1e-6,
+        gate_bias_init: float = 1.0,
         latent_nonlinearity="none",
+        pool_use_act: bool = True,
     ):
         super().__init__()
         self.latent_nonlinearity = latent_nonlinearity
+        self.pool_use_act = pool_use_act
 
         # ───────────────────────────────────────────────────────────────
         # 0.  Group bookkeeping
@@ -634,7 +890,7 @@ class EquivariantConvNeXtEncoder(nn.Module):
         # bl_repr = directsum(irreps, name=f"bl_reg_{self.max_freq}")
         # print(bl_repr)
         repr_dim       = 1 + 2 * self.max_freq                           # 7 for max_freq = 3
-
+       
         # ------------------------------------------------------------------
         # 1.  Build FieldTypes for every stage
         # ------------------------------------------------------------------
@@ -646,6 +902,10 @@ class EquivariantConvNeXtEncoder(nn.Module):
             #     )
             # reps = [bl_repr] * (channels // repr_dim)
             reps = [bl_repr] * channels
+            # irrep_reps = [self.G.irrep(*irr) for irr in bl_repr.irreps]
+
+            # teraz "channels" oznacza liczbę kopii całego bl-banku (tak jak wcześniej)
+            # reps = irrep_reps * channels
             # print(reps)
             return e2nn.FieldType(self.r2_act, reps)
 
@@ -665,7 +925,20 @@ class EquivariantConvNeXtEncoder(nn.Module):
         for idx, out_type in enumerate(stage_types):
             if idx == 0 and not include_stem:
                 # identity shortcut if the user opts out of a stem
-                self.poolings.append(e2nn.IdentityModule(prev_type))
+                self.poolings.append(
+                    nn.Sequential(
+                        e2nn.R2Conv(
+                            prev_type, out_type,
+                            kernel_size=3, # was 3x3
+                            stride=2,
+                            padding=1, # change wrt 74, 75
+                            bias=True,
+                            initialize=True, # TODO: set to True if you want to initialize
+                        ),
+                        # e2nn.IIDBatchNorm2d(out_type, affine=True, track_running_stats=False),
+                        # e2nn.FieldNorm(out_type, eps=1e-5, affine=True),
+                    )
+                )
             else:
                 # print(f"Pooling from {prev_type} to {out_type}")
                 self.poolings.append(
@@ -725,7 +998,7 @@ class EquivariantConvNeXtEncoder(nn.Module):
                             bias=True,
                             initialize=True, # TODO: set to True if you want to initialize
                         ),
-                        e2nn.FieldNorm(out_type, eps=1e-5, affine=True)
+                        # e2nn.FieldNorm(out_type, eps=1e-5, affine=True),
                     )
                     # this is what the 74, and 75 versions had
                     # e2nn.R2Conv(
@@ -742,9 +1015,10 @@ class EquivariantConvNeXtEncoder(nn.Module):
         # ------------------------------------------------------------------
         # 3.  Stage-wise NormNonLinearities (GELU analogue) and blocks
         # ------------------------------------------------------------------
-        self.acts = nn.ModuleList(
-            [e2nn.NormNonLinearity(t) for t in stage_types]
-        )
+        if self.pool_use_act:
+            self.acts = nn.ModuleList(
+                [e2nn.NormNonLinearity(t) for t in stage_types]
+            )
 
         self.blocks = nn.ModuleList(
             [
@@ -752,6 +1026,10 @@ class EquivariantConvNeXtEncoder(nn.Module):
                     in_type=t,
                     num_blocks=n,
                     use_grn=use_grn,
+                    use_gating=use_gating,
+                    use_layerscale=use_layerscale,
+                    layerscale_init=layerscale_init,
+                    gate_bias_init=gate_bias_init,
                 )
                 for t, n in zip(stage_types, layers_blocks)
             ]
@@ -782,15 +1060,26 @@ class EquivariantConvNeXtEncoder(nn.Module):
         features = []
 
         g = e2nn.GeometricTensor(x, self.input_type)
-        for i, (pool, act, blk) in enumerate(zip(self.poolings, self.acts, self.blocks)):
-            g = act(pool(g))
-            g = blk(g)
-            if i == len(self.blocks) - 1:
-                g = self.regular2trivial(g)
-                g = g.tensor  # Extract the raw tensor from GeometricTensor
-                # g = self._postprocess_latent(g)
-            if return_features:
-                features.append(g)
+        if self.pool_use_act:
+            for i, (pool, act, blk) in enumerate(zip(self.poolings, self.acts, self.blocks)):
+                g = act(pool(g))
+                g = blk(g)
+                if i == len(self.blocks) - 1:
+                    g = self.regular2trivial(g)
+                    g = g.tensor  # Extract the raw tensor from GeometricTensor
+                    # g = self._postprocess_latent(g)
+                if return_features:
+                    features.append(g)
+        else:
+            for i, (pool, blk) in enumerate(zip(self.poolings, self.blocks)):
+                g = pool(g)
+                g = blk(g)
+                if i == len(self.blocks) - 1:
+                    g = self.regular2trivial(g)
+                    g = g.tensor  # Extract the raw tensor from GeometricTensor
+                    # g = self._postprocess_latent(g)
+                if return_features:
+                    features.append(g)
 
         outputs["output"] = g
         if return_features:

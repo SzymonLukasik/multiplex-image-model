@@ -4,8 +4,6 @@ import numpy as np
 import torch
 import torch.optim as optim
 import matplotlib.pyplot as plt
-import neptune
-from neptune.utils import stringify_unsupported
 from ruamel.yaml import YAML
 from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
@@ -20,6 +18,74 @@ from multiplex_model.losses import nll_loss
 from multiplex_model.utils import ClampWithGrad, plot_reconstructs_with_uncertainty, get_scheduler_with_warmup
 from multiplex_model.modules import MultiplexAutoencoder
 from multiplex_model.run_utils import build_run_name_suffix, SLURM_JOB_ID
+
+try:
+    import neptune
+    from neptune.utils import stringify_unsupported as _neptune_stringify
+except ImportError:
+    neptune = None
+    _neptune_stringify = None
+
+try:
+    from torch.utils.tensorboard import SummaryWriter
+except ImportError:
+    SummaryWriter = None
+
+def stringify_unsupported(value):
+    if _neptune_stringify is None:
+        return value
+    return _neptune_stringify(value)
+
+class _TensorboardSysName:
+    def __init__(self, run):
+        self._run = run
+
+    def fetch(self):
+        return self._run.name
+
+class _TensorboardChannel:
+    def __init__(self, run, key):
+        self._run = run
+        self._key = key
+
+    def append(self, value, step=None, description=None):
+        if self._key.endswith("/imgs"):
+            self._run.writer.add_figure(self._key, value, global_step=step)
+            if description:
+                self._run.writer.add_text(
+                    f"{self._key}/description",
+                    description,
+                    global_step=step,
+                )
+            return
+
+        if isinstance(value, torch.Tensor):
+            if value.numel() == 1:
+                value = value.item()
+            else:
+                value = value.mean().item()
+
+        self._run.writer.add_scalar(self._key, value, global_step=step)
+
+class TensorboardRun:
+    def __init__(self, name, log_dir):
+        if SummaryWriter is None:
+            raise ImportError("TensorBoard is not installed, but logger is set to tensorboard.")
+        self.name = name
+        self.writer = SummaryWriter(log_dir=log_dir)
+        self.writer.add_text("sys/name", name)
+
+    def __getitem__(self, key):
+        if key == "sys/name":
+            return _TensorboardSysName(self)
+        return _TensorboardChannel(self, key)
+
+    def __setitem__(self, key, value):
+        self.writer.add_text(key, str(value))
+
+    def stop(self):
+        self.writer.flush()
+        self.writer.close()
 
 def apply_patch_mask(x: torch.Tensor, ratio: float, patch_size: int) -> torch.Tensor:
     # x: [B, C, H, W]
@@ -67,6 +133,8 @@ def train_masked(
         fully_masked_channels_max_frac=0.5,
         spatial_masking_ratio=0.6,
         mask_patch_size=8,
+        early_val_epochs=0,
+        early_val_checks_per_epoch=1,
         start_epoch=0,
         save_checkpoint_every=5,
         checkpoints_path='checkpoints'
@@ -97,6 +165,18 @@ def train_masked(
         print(f'Created checkpoints directory at {checkpoints_path}')
 
     steps_per_epoch = len(train_dataloader) // gradient_accumulation_steps
+    early_val_epochs = 0 if early_val_epochs is None else int(early_val_epochs)
+    early_val_checks_per_epoch = 1 if early_val_checks_per_epoch is None else int(early_val_checks_per_epoch)
+
+    def _build_val_steps(steps_per_epoch: int, checks_per_epoch: int) -> set:
+        if checks_per_epoch <= 1:
+            return {steps_per_epoch}
+        return {
+            max(1, int(round(steps_per_epoch * (i + 1) / checks_per_epoch)))
+            for i in range(checks_per_epoch)
+        }
+
+    early_val_steps = _build_val_steps(steps_per_epoch, early_val_checks_per_epoch)
     global_step = start_epoch * steps_per_epoch
     current_min_channels_frac = get_min_channels_frac_for_step(global_step)
     val_loss = test_masked(
@@ -104,7 +184,7 @@ def train_masked(
         val_dataloader, 
         device, 
         run, 
-        None, 
+        0, 
         spatial_masking_ratio=spatial_masking_ratio,
         fully_masked_channels_max_frac=fully_masked_channels_max_frac,
         mask_patch_size=mask_patch_size,
@@ -114,6 +194,9 @@ def train_masked(
 
     for epoch in range(start_epoch, epochs):
         model.train()
+        step_in_epoch = 0
+        did_epoch_end_val = False
+        early_val_active = epoch < early_val_epochs and early_val_checks_per_epoch > 1
         for batch_idx, (img, channel_ids, panel_idx, img_path) in enumerate(train_dataloader):
             if img.shape[-1] != SIZE[0]:
                 print(f'Skipping batch {batch_idx} in epoch {epoch} due to incorrect image size: {img.shape[-1]}')
@@ -197,29 +280,51 @@ def train_masked(
                 optimizer.zero_grad()
                 scheduler.step()
                 step = epoch * len(train_dataloader) // gradient_accumulation_steps + batch_idx // gradient_accumulation_steps
+                step_in_epoch += 1
                 run['train/loss'].append(loss.item(), step=step)
                 run['train/lr'].append(scheduler.get_last_lr()[0], step=step)
                 run['train/µ'].append(mi.mean().item(), step=step)
                 run['train/logvar'].append(logsigma.mean().item(), step=step)
                 run['train/mae'].append(torch.abs(img - mi).mean().item(), step=step)
-                run['train/mse'].append(torch.square(img - mi).mean().item())
+                run['train/mse'].append(torch.square(img - mi).mean().item(), step=step)
                 run['train/min_channels_frac'].append(current_min_channels_frac, step=step)
                 global_step += 1
                 current_min_channels_frac = get_min_channels_frac_for_step(global_step)
+
+                if early_val_active and step_in_epoch in early_val_steps:
+                    val_loss = test_masked(
+                        model,
+                        val_dataloader,
+                        device,
+                        run,
+                        epoch,
+                        spatial_masking_ratio=spatial_masking_ratio,
+                        fully_masked_channels_max_frac=fully_masked_channels_max_frac,
+                        mask_patch_size=mask_patch_size,
+                        marker_names_map=marker_names_map,
+                        val_step=step,
+                    )
+                    print(
+                        f'Validation loss (epoch {epoch}, step {step_in_epoch}/{steps_per_epoch}): {val_loss:.4f}'
+                    )
+                    model.train()
+                    if step_in_epoch == steps_per_epoch:
+                        did_epoch_end_val = True
         # scheduler.step()
 
-        val_loss = test_masked(
-            model, 
-            val_dataloader, 
-            device, 
-            run, 
-            epoch, 
-            spatial_masking_ratio=spatial_masking_ratio,
-            fully_masked_channels_max_frac=fully_masked_channels_max_frac,
-            mask_patch_size=mask_patch_size,
-            marker_names_map=marker_names_map,
-        )
-        print(f'Validation loss: {val_loss:.4f}')
+        if not early_val_active or not did_epoch_end_val:
+            val_loss = test_masked(
+                model,
+                val_dataloader,
+                device,
+                run,
+                epoch,
+                spatial_masking_ratio=spatial_masking_ratio,
+                fully_masked_channels_max_frac=fully_masked_channels_max_frac,
+                mask_patch_size=mask_patch_size,
+                marker_names_map=marker_names_map,
+            )
+            print(f'Validation loss: {val_loss:.4f}')
 
         if (epoch + 1) % save_checkpoint_every == 0:
             checkpoint = {
@@ -253,6 +358,7 @@ def test_masked(
         spatial_masking_ratio=0.6,
         fully_masked_channels_max_frac=0.5,
         mask_patch_size=8,
+        val_step=None,
         ):
     model.eval()
     running_loss = 0.0
@@ -261,6 +367,7 @@ def test_masked(
     plot_indices = np.random.choice(np.arange(len(test_dataloader)), size=num_plots, replace=False)
     plot_indices = set(plot_indices)
     rand_gen = torch.Generator().manual_seed(42)
+    step_base = epoch if val_step is None else int(val_step)
     with torch.no_grad():
         for idx, (img, channel_ids, panel_idx, img_path) in enumerate(test_dataloader):
             batch_size, num_channels, H, W = img.shape
@@ -315,14 +422,16 @@ def test_masked(
                     markers_names_map=marker_names_map,
                     scale_by_max=True
                 )
+                step = step_base * len(test_dataloader) + idx
                 run['val/imgs'].append(
                     reconstr_img, 
-                    description=f'Resuilting outputs (variance scaled by min-max)  (dataset {panel_idx[0]}, image {img_path[0]}, epoch {epoch})'
-                                '\n\nMasked channels: {}'.format(masked_channels_names)
+                    # description=f'Resuilting outputs (variance scaled by min-max)  (dataset {panel_idx[0]}, image {img_path[0]}, epoch {epoch})'
+                                # '\n\nMasked channels: {}'.format(masked_channels_names),
+                    step=step
                 )
                 plt.close('all')
                 
-    step = None #(epoch + 1) * len(test_dataloader)
+    step = step_base
     val_loss = running_loss / len(test_dataloader)
     run['val/loss'].append(val_loss, step=step)
     run['val/mae'].append(running_mae / len(test_dataloader), step=step)
@@ -336,20 +445,40 @@ if __name__ == '__main__':
     yaml = YAML(typ='safe')
     with open(config_path, 'r') as f:
         config = yaml.load(f)
-    
-    with open("/home/szlukasik/immu-vis/multiplex-image-model/secrets/neptune.yaml", 'r') as f:
-        secrets = yaml.load(f)
+
+    print(f'Loaded configuration from {config_path}:')
+    print(config)
+
 
     prefix = config.get("run_prefix", "").strip()         # empty by default
     suffix = build_run_name_suffix()                               # always unique
     run_name = f"{prefix}_{suffix}" if prefix else suffix
 
-    run = neptune.init_run(
-        name=run_name,
-        project=secrets['neptune_project'],
-        api_token=secrets['neptune_api_token'],
-        tags=config['tags'],
-    )
+    logger_type = config.get("logger", "neptune").lower()
+    if config.get("use_tensorboard"):
+        logger_type = "tensorboard"
+
+    if logger_type == "tensorboard":
+        log_dir_root = config.get("tensorboard_log_dir", "runs")
+        log_dir = os.path.join(log_dir_root, run_name)
+        run = TensorboardRun(name=run_name, log_dir=log_dir)
+    elif logger_type == "neptune":
+        if neptune is None:
+            raise ImportError("Neptune is not installed, but logger is set to neptune.")
+        neptune_secrets_path = config.get(
+            "neptune_secrets_path",
+            "./secrets/neptune.yaml",
+        )
+        with open(neptune_secrets_path, 'r') as f:
+            secrets = yaml.load(f)
+        run = neptune.init_run(
+            name=run_name,
+            project=secrets['neptune_project'],
+            api_token=secrets['neptune_api_token'],
+            tags=config.get('tags', []),
+        )
+    else:
+        raise ValueError(f"Unsupported logger type: {logger_type}")
 
     device = config['device']
     print(f'Using device: {device}')
@@ -469,10 +598,13 @@ if __name__ == '__main__':
 
     
     run["slurm/job_id"] = SLURM_JOB_ID
+    run['config'] = config
     # run["sys/run_name"] = run_name
 
     min_channels_frac = config.get('min_channels_frac', 0.5)
     min_channels_frac_dict = config.get('min_channels_frac_dict')
+    early_val_epochs = config.get('early_val_epochs', 0)
+    early_val_checks_per_epoch = config.get('early_val_checks_per_epoch', 1)
 
     parameters = {
         "batch_size": BATCH_SIZE,
@@ -485,6 +617,8 @@ if __name__ == '__main__':
         "num_annealing_steps": num_annealing_steps,
         "model_config": stringify_unsupported(model_config),
         "min_channels_frac": min_channels_frac,
+        "early_val_epochs": early_val_epochs,
+        "early_val_checks_per_epoch": early_val_checks_per_epoch,
         # "min_channels_frac_dict": stringify_unsupported(min_channels_frac_dict) if min_channels_frac_dict else None,
     }
     if config.get("from_checkpoint"):
@@ -505,6 +639,8 @@ if __name__ == '__main__':
         min_channels_frac=min_channels_frac,
         save_checkpoint_every=config['save_checkpoint_freq'],
         marker_names_map=INV_TOKENIZER,
+        early_val_epochs=early_val_epochs,
+        early_val_checks_per_epoch=early_val_checks_per_epoch,
     )
 
     run.stop()
