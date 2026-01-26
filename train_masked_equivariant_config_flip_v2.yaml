@@ -3,8 +3,8 @@ encoder:
     ma_layers_blocks: [6]
     ma_embedding_dims: [8]
     # pan-marker equivariant branch
-    pm_layers_blocks: [2, 2]
-    # pm_layers_blocks: [6, 6]
+    # pm_layers_blocks: [2, 2]
+    pm_layers_blocks: [6, 6]
     # pm_embedding_dims: [64, 128]
     # pm_embedding_dims: [128, 256]
     pm_embedding_dims: [256, 512]
@@ -13,7 +13,7 @@ encoder:
     latent_nonlinearity: "none"
 
     use_gating: true
-    use_layerscale: True
+    use_layerscale: True #True, czemu mialem False przed chwila??
     layerscale_init: 1.0e-6
     gate_bias_init: 1.0
     pool_use_act: true
@@ -58,7 +58,7 @@ min_channels_frac: 0.75
 spatial_masking_ratio: 0.6
 fully_masked_channels_max_frac: 0.5
 mask_patch_size: 8
-from_checkpoint: null
+from_checkpoint: /p/project1/hai_1191/lukasik1/immu-vis/multiplex-image-model/checkpoints/checkpoint-EquivariantConvnext_v2_20260113_022759_J14355603-epoch_9.pth
 checkpoints_dir: checkpoints
 save_checkpoint_freq: 10
 
