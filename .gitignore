@@ -217,3 +217,15 @@ secrets/
 logs/
 
 runs/
+
+src_from_rudy/
+
+results/
+
+untracked/
+
+run_equivariance_eval_notebook.py
+run_variance_baseline.out
+scripts/run_variance_baseline.sh
+
+
