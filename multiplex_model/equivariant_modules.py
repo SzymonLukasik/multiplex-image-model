@@ -468,6 +468,7 @@ class EquivariantMultiplexImageEncoder(nn.Module):
         if return_features:
             outputs['features'] = features
 
+        # print(f"Latent shape: {x.shape}")
         return outputs
 
 
@@ -1091,8 +1092,8 @@ class EquivariantConvNeXtEncoder(nn.Module):
         # Under AMP (bfloat16), this can produce a bf16 bias while the input stays fp32,
         # which then crashes in conv2d with "Input type (float) and bias type (BFloat16)".
         # Run the equivariant encoder in full precision when autocast is enabled.
-        if x.is_cuda and torch.is_autocast_enabled():
-            with torch.autocast(device_type="cuda", enabled=False):
-                return self._forward_impl(x.float(), return_features=return_features)
+        # if x.is_cuda and torch.is_autocast_enabled():
+        #     with torch.autocast(device_type="cuda", enabled=False):
+        #         return self._forward_impl(x.float(), return_features=return_features)
         return self._forward_impl(x, return_features=return_features)
     
