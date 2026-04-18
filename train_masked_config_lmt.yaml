@@ -1,0 +1,78 @@
+encoder:
+    # marker-agnostic part
+    ma_layers_blocks: [1]
+    ma_embedding_dims: [16]
+    # pan-marker part
+    pm_layers_blocks: [4, 4, 4]
+    pm_embedding_dims: [192, 384, 768]
+    # Learnable mask token configuration.
+    #   'point' = (1, E_ma, 1, 1), 16 params
+    #   'patch' = (1, E_ma, mask_token_feat_patch, mask_token_feat_patch), 256 params
+    # For 'patch', mask_token_feat_patch MUST equal mask_patch_size // 2.
+    # mask_token_shape: 'patch'
+    # mask_token_feat_patch: 4
+
+    hyperkernel_config:
+      embedding_dim: 384
+      kernel_size: 1
+      padding: 0
+      stride: 1
+      use_bias: true
+
+decoder:
+  decoded_embed_dim: 512
+  num_blocks: 1
+
+  hyperkernel_config:
+      # embedding_dim == decoded_embed_dim
+      kernel_size: 1
+      padding: 0
+      stride: 1
+      use_bias: true
+
+apply_spatial_mask: False
+
+# Data configuration
+panel_config: configs/all_panels_config.yaml
+tokenizer_config: configs/all_markers_tokenizer.yaml
+input_image_size: [128, 128]
+num_workers: 4
+batch_size: 4
+
+# Training configuration
+device: cuda
+lr: 5e-4
+final_lr: 1e-4
+weight_decay: 0.0001
+gradient_accumulation_steps: 1
+epochs: 200
+frac_warmup_steps: 0.1
+early_val_epochs: 3
+early_val_checks_per_epoch: 5
+min_channels_frac: 0.75
+spatial_masking_ratio: 0.6
+fully_masked_channels_max_frac: 0.5
+mask_patch_size: 8
+feat_mask_dilation: 0
+from_checkpoint: null
+#/net/tscratch/people/plgslukasik/immu-vis/multiplex-image-model/checkpoints/ImmuVis-768_model-UN-475.pth
+checkpoints_dir: checkpoints
+save_checkpoint_freq: 10
+
+resume_optimizer: False
+resume_scheduler: False
+
+# Neptune logging configuration
+# tags: ['ConvNext', 'learnable-mask-token', 'patch-token', 'no-leak', 'panel-1 data', 'Gaussian NLL']
+# run_prefix: 'Convnext_LMT_NL_patch'
+# model_type: "Convnext"
+tags: ['ConvNext','Gaussian NLL']
+run_prefix: 'Convnext'
+model_type: "Convnext"
+
+# logger: tensorboard
+# tensorboard_log_dir: runs
+
+logger: tensorboard
+tensorboard_log_dir: runs
+
