@@ -1,0 +1,100 @@
+encoder:
+    # marker-agnostic branch
+    ma_layers_blocks: [1]
+    ma_embedding_dims: [8]
+    # pan-marker equivariant branch
+    # pm_layers_blocks: [2, 2]
+    pm_layers_blocks: [4, 4, 4]
+    # pm_layers_blocks: [4, 4]
+    # pm_embedding_dims: [64, 128]
+    # pm_embedding_dims: [128, 256]
+    # pm_embedding_dims: [192, 384, 768]
+    pm_embedding_dims: [128, 256, 512]
+    # pm_embedding_dims: [64, 128, 256]
+    maximum_frequency: 2
+    include_stem: true
+    latent_nonlinearity: "none"
+
+    use_gating: true
+    use_layerscale: True #True, czemu mialem False przed chwila??
+    layerscale_init: 1.0e-6
+    gate_bias_init: 1.0
+    pool_use_act: true
+    use_norm: true
+    # use_grn: false
+
+    # output_scalars: explicit target scalar count for final Regular2Trivial projection.
+    # If unset, defaults to pm_embedding_dims[-1] (number of fields).
+    # For max_freq > 1, you typically want to set this explicitly.
+    # Example: max_freq=3 gives repr_dim=7, so 256 fields*7=1792 channels → output_scalars: 512
+    output_scalars: 512
+
+    hyperkernel_config:
+      embedding_dim: 384
+      kernel_size: 1
+      padding: 0
+      stride: 1
+      use_bias: true
+      # intertwiner_basis: how the marker-conditioned mixer maps BL-regular fields
+      #   "scalar" — one real weight per (input field, output field) pair (default,
+      #              cheapest, uniformly scales the whole field)
+      #   "full"   — 1 + max_freq real weights per pair (separate scalar per
+      #              matching irrep; max equivariant expressivity under O(2))
+      intertwiner_basis: full
+
+decoder:
+  decoded_embed_dim: 768
+  num_blocks: 1
+
+  hyperkernel_config:
+      # embedding_dim == decoded_embed_dim
+      kernel_size: 1
+      padding: 0
+      stride: 1
+      use_bias: true
+
+# Data configuration
+panel_config: configs/all_panels_config.yaml
+tokenizer_config: configs/all_markers_tokenizer.yaml
+input_image_size: [113, 113]
+num_workers: 2
+batch_size: 4
+
+# Training configuration
+device: cuda
+lr: 5e-4
+final_lr: 1e-4
+weight_decay: 0.0001
+gradient_accumulation_steps: 1
+epochs: 200 #250
+frac_warmup_steps: 0.1
+early_val_epochs: 3
+early_val_checks_per_epoch: 5
+min_channels_frac: 0.75
+spatial_masking_ratio: 0.6
+fully_masked_channels_max_frac: 0.5
+mask_patch_size: 8
+checkpoints_dir: checkpoints
+save_checkpoint_freq: 5
+
+resume_optimizer: False
+resume_scheduler: False
+
+
+# Neptune logging configuration
+# 'iidbatchnorm-really'
+# no-norm
+# field-norm-everywhere
+# 'equivariant-pixel-ln'
+# iidbatchnorm-norm-no-stats-everywhere
+#  'FieldNorm everywhere'
+#   
+# 'iidbatchnorm-norm-no-stats-no-poolings' clamp-15
+tags: ['modelv2', 'antialiased-downsample', 'bl-through-interface', 'equivariant-hyperkernel', 'equiv-pixel-ln', 'clamp-5', 'beta_0.5', 'new-113-shape', 'flip-equivariance', 'patch-masking', 'Gaussian NLL', 'Steerable', 'escnn']
+run_prefix: 'EquivariantConvnext_v2modelv2'
+model_type: "EquivariantConvnext"
+
+logger: tensorboard
+tensorboard_log_dir: runs
+
+# changed batch size to 2, restarted lr scheduler for the smaller
