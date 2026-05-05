@@ -6,10 +6,16 @@ Usage:
         --model "ID=outputs/603" \
         --model "Zero-shot=outputs/612" \
         --output-dir ./outputs/compare \
-        [--reference 0] [--no-figures]
+        [--reference 0] [--no-figures] [--restrict-dataset hn]
 
 Each --model is either '<dir>' or '<label>=<dir>'. The --reference index
 selects which model deltas are computed against (default: first).
+
+If --restrict-dataset is set, every model's global / per-marker rows are
+re-aggregated from per_patch_channel.csv filtered to that dataset_name
+(and its pool rows where AUROC/AURC/F1 need them). This lets a multi-
+dataset model (e.g. 622) be compared fairly against single-dataset runs
+(e.g. 612, 603) on a shared slice such as `hn`.
 """
 from __future__ import annotations
 
@@ -45,6 +51,14 @@ def parse_args() -> argparse.Namespace:
         help="Index of the reference model (deltas computed as other - reference). Default 0.",
     )
     p.add_argument("--no-figures", action="store_true")
+    p.add_argument(
+        "--restrict-dataset",
+        default=None,
+        help="If set (e.g. 'hn'), re-aggregate every model's global/per-marker "
+             "metrics from per_patch_channel.csv filtered to that dataset_name. "
+             "Use this to fairly compare a multi-dataset model against single-"
+             "dataset runs on a shared slice.",
+    )
     return p.parse_args()
 
 
@@ -81,8 +95,13 @@ def run(args: argparse.Namespace) -> None:
     models: list[ModelOutputs] = []
     for spec in args.model:
         path, label = parse_model_arg(spec)
-        models.append(load_model(path, label=label))
+        models.append(
+            load_model(path, label=label, restrict_dataset=args.restrict_dataset)
+        )
     models = _dedupe_labels(models)
+    if args.restrict_dataset:
+        print(f"[compare] restrict_dataset='{args.restrict_dataset}' — per-marker / "
+              "global rows re-aggregated from per_patch_channel.csv on that slice.")
 
     if not (0 <= args.reference < len(models)):
         raise ValueError(f"--reference {args.reference} out of range [0, {len(models)})")
@@ -149,6 +168,7 @@ def run(args: argparse.Namespace) -> None:
         "reference_index": args.reference,
         "marker_intersection_size": len(markers),
         "marker_intersection": markers,
+        "restrict_dataset": args.restrict_dataset,
         "timestamp_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
     with open(csv_dir / "run_metadata.json", "w") as f:

@@ -97,7 +97,7 @@ def reliability_per_marker_compare(
     for i, marker in enumerate(order):
         ax = axes[i // cols, i % cols]
         ax.plot([0, 1], [0, 1], color="grey", linestyle="--", linewidth=0.8)
-        title_bits = [marker]
+        ece_lines: list[tuple[str, float, str]] = []
         for m, color in zip(models, colors):
             cov = m.coverage_curves[
                 (m.coverage_curves["group_type"] == "per_marker")
@@ -109,8 +109,24 @@ def reliability_per_marker_compare(
             ]
             ece = float(g["ece_reg"].iloc[0]) if len(g) else float("nan")
             ax.plot(cov["alpha"], cov["empirical_coverage"], color=color, linewidth=1.2)
-            title_bits.append(f"{m.label[:8]}={ece:.2f}")
-        ax.set_title(" | ".join(title_bits), fontsize=7)
+            ece_lines.append((m.label, ece, color))
+        # Marker name as the title (always fits inside the panel).
+        ax.set_title(marker, fontsize=8)
+        # Per-model ECE values as a stacked, color-coded text block in the
+        # upper-left corner; this never spills into the next column regardless
+        # of N or label length.
+        for k, (lab, val, color) in enumerate(ece_lines):
+            short = lab if len(lab) <= 10 else f"{lab[:9]}…"
+            ax.text(
+                0.04,
+                0.96 - 0.10 * k,
+                f"{short}: {val:.3f}",
+                transform=ax.transAxes,
+                fontsize=6.5,
+                color=color,
+                va="top",
+                ha="left",
+            )
         ax.set_xlim(0, 1)
         ax.set_ylim(0, 1)
         ax.tick_params(axis="both", labelsize=7)
@@ -246,26 +262,47 @@ def f1_per_marker_compare(
     colors = _colors(len(models))
     for ax, q in zip(axes[0], quantiles):
         qtag = f"q{int(round(q*100)):02d}"
-        cols = [f"f1_{qtag}__{m.label}" for m in models]
-        if any(c not in compare_per_marker.columns for c in cols):
-            ax.set_visible(False)
+        present = [
+            (m, color)
+            for m, color in zip(models, colors)
+            if f"f1_{qtag}__{m.label}" in compare_per_marker.columns
+        ]
+        missing = [
+            m.label for m in models
+            if f"f1_{qtag}__{m.label}" not in compare_per_marker.columns
+        ]
+        if not present:
+            ax.text(0.5, 0.5,
+                    f"q={q}: no F1 data for any model\n(missing AUROC-pool dataset column?)",
+                    transform=ax.transAxes, ha="center", va="center",
+                    fontsize=9, color="firebrick")
+            ax.set_xticks([]); ax.set_yticks([])
             continue
-        df = compare_per_marker.dropna(subset=cols).copy()
+        cols = [f"f1_{qtag}__{m.label}" for m, _ in present]
+        df = compare_per_marker.dropna(subset=cols, how="all").copy()
         if df.empty:
-            ax.set_visible(False)
+            ax.text(0.5, 0.5, f"q={q}: all F1 values are NaN",
+                    transform=ax.transAxes, ha="center", va="center",
+                    fontsize=9, color="firebrick")
+            ax.set_xticks([]); ax.set_yticks([])
             continue
         df = df.sort_values(cols[0], ascending=True)
         n_markers = len(df)
-        bar_h = 0.8 / len(models)
+        bar_h = 0.8 / max(len(present), 1)
         y = np.arange(n_markers)
-        for i, (m, color) in enumerate(zip(models, colors)):
-            offset = (i - (len(models) - 1) / 2) * bar_h
-            ax.barh(y + offset, df[f"f1_{qtag}__{m.label}"], height=bar_h, color=color, label=m.label)
-        ax.axvline(1.0 - q, color="black", linestyle="--", linewidth=0.8, label=f"chance ({1.0 - q:.2f})")
+        for i, (m, color) in enumerate(present):
+            offset = (i - (len(present) - 1) / 2) * bar_h
+            ax.barh(y + offset, df[f"f1_{qtag}__{m.label}"],
+                    height=bar_h, color=color, label=m.label)
+        ax.axvline(1.0 - q, color="black", linestyle="--", linewidth=0.8,
+                   label=f"chance ({1.0 - q:.2f})")
         ax.set_yticks(y)
         ax.set_yticklabels(df["marker"].tolist(), fontsize=7)
         ax.set_xlabel(f"F1 (q={q})")
-        ax.set_title(f"q = {q}")
+        title = f"q = {q}"
+        if missing:
+            title += f"\n(missing: {', '.join(missing)})"
+        ax.set_title(title, fontsize=9)
         ax.grid(axis="x", alpha=0.3)
         ax.legend(loc="lower right", fontsize=7)
     fig.suptitle("Per-marker σ-vs-|residual| F1", fontsize=11)
