@@ -192,3 +192,94 @@ def process_npz_chunk(
         )
 
     return rows, pool_df
+
+
+# ---------------------------------------------------------------------------
+# AUSE — Area Under Sparsification Error.
+# Sort pixels by predicted σ descending, sweep the kept fraction (1-f) from 1
+# down to ~0; the error on the kept set is the sparsification curve. The
+# oracle does the same, sorting by |r| instead of σ; SE = err_σ - err_oracle,
+# AUSE = ∫ SE df. Lower is better. AUSE = 0 iff σ ranks pixels exactly like |r|.
+# ---------------------------------------------------------------------------
+
+def sparsification_curve(
+    score: np.ndarray,
+    abs_r: np.ndarray,
+    n_points: int = 100,
+    metric: str = "rmse",
+) -> tuple[np.ndarray, np.ndarray]:
+    """Error on the (1-f) lowest-`score` fraction of pixels, swept over f∈[0,1).
+
+    Returns (fractions, err) where err[i] is the metric on the pixels kept
+    after removing the highest-`score` fraction `fractions[i]`.
+    """
+    if metric not in ("rmse", "mae"):
+        raise ValueError(f"metric must be 'rmse' or 'mae', got {metric!r}")
+    score = np.asarray(score, dtype=np.float64).ravel()
+    abs_r = np.asarray(abs_r, dtype=np.float64).ravel()
+    if score.size != abs_r.size:
+        raise ValueError("score and abs_r must have the same length")
+    n = score.size
+    if n == 0:
+        return np.empty(0), np.empty(0)
+
+    # Reorder abs_r so that index 0 has the *lowest* score (kept first).
+    order_asc = np.argsort(score, kind="quicksort")
+    r_asc = abs_r[order_asc]
+
+    cum_sq = np.cumsum(r_asc * r_asc)
+    cum_abs = np.cumsum(r_asc)
+    counts = np.arange(1, n + 1, dtype=np.float64)
+
+    fractions = np.linspace(0.0, 1.0, n_points + 1)[:-1]  # exclude empty kept set
+    err = np.empty_like(fractions)
+    for i, f in enumerate(fractions):
+        k = max(1, int(round((1.0 - f) * n)))
+        if metric == "rmse":
+            err[i] = float(np.sqrt(cum_sq[k - 1] / counts[k - 1]))
+        else:
+            err[i] = float(cum_abs[k - 1] / counts[k - 1])
+    return fractions, err
+
+
+def ause(
+    sigma: np.ndarray,
+    abs_r: np.ndarray,
+    metric: str = "rmse",
+    n_points: int = 100,
+    seed: int = 0,
+) -> dict:
+    """Compute AUSE plus the σ / oracle / random sparsification curves.
+
+    Returns a dict with the four arrays (fractions, err_sigma, err_oracle,
+    err_random), the sparsification-error curve, and three scalars
+    (`ause`, `ause_random`, `ause_normalised`). All on the same pool.
+    """
+    sigma = np.asarray(sigma, dtype=np.float64).ravel()
+    abs_r = np.asarray(abs_r, dtype=np.float64).ravel()
+
+    fractions, e_sigma = sparsification_curve(sigma, abs_r, n_points, metric)
+    _, e_oracle = sparsification_curve(abs_r, abs_r, n_points, metric)
+
+    rng = np.random.default_rng(seed)
+    rand_score = rng.permutation(abs_r)
+    _, e_random = sparsification_curve(rand_score, abs_r, n_points, metric)
+
+    se = e_sigma - e_oracle
+    se_random = e_random - e_oracle
+    ause_val = float(np.trapz(se, fractions))
+    ause_rand = float(np.trapz(se_random, fractions))
+    norm = float(ause_val / ause_rand) if ause_rand > 0 else float("nan")
+
+    return {
+        "fractions": fractions,
+        "err_sigma": e_sigma,
+        "err_oracle": e_oracle,
+        "err_random": e_random,
+        "sparsification_error": se,
+        "ause": ause_val,
+        "ause_random": ause_rand,
+        "ause_normalised": norm,
+        "metric": metric,
+        "n_pixels": int(sigma.size),
+    }

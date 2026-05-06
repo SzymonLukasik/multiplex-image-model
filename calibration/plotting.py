@@ -614,6 +614,104 @@ def metric_summary_heatmap(
     _save(fig, out_dir, "metric_summary_heatmap")
 
 
+def sparsification_global(
+    sparsification_csv: Path, ause_csv: Path, out_dir: Path, model_id: str,
+    metric: str = "rmse",
+) -> None:
+    """Two-panel global figure: sparsification curves + sparsification error."""
+    if not (sparsification_csv.exists() and ause_csv.exists()):
+        return
+    sp = pd.read_csv(sparsification_csv)
+    ause = pd.read_csv(ause_csv)
+    sp_g = sp[
+        (sp["group_type"] == "global")
+        & (sp["metric"] == metric)
+    ].sort_values("fraction")
+    if sp_g.empty:
+        return
+    a_g = ause[
+        (ause["group_type"] == "global") & (ause["metric"] == metric)
+    ]
+    a_val = float(a_g["ause"].iloc[0]) if len(a_g) else float("nan")
+    a_norm = float(a_g["ause_normalised"].iloc[0]) if len(a_g) else float("nan")
+
+    fig, (ax_sp, ax_se) = plt.subplots(
+        1, 2, figsize=(8.6, 3.6),
+        gridspec_kw={"width_ratios": [1.0, 1.0], "wspace": 0.28},
+    )
+
+    ax_sp.plot(sp_g["fraction"], sp_g["err_oracle"],
+               color="grey", linestyle="-", linewidth=1.0, label="oracle")
+    ax_sp.plot(sp_g["fraction"], sp_g["err_random"],
+               color="grey", linestyle=":", linewidth=1.0, label="random")
+    ax_sp.plot(sp_g["fraction"], sp_g["err_sigma"],
+               color="C0", linewidth=1.6, label=f"σ̂  (AUSE={a_val:.3f})")
+    ax_sp.set_xlim(0, 1)
+    ax_sp.set_ylim(bottom=0)
+    ax_sp.set_xlabel("fraction removed (highest σ̂ first)", fontsize=10)
+    ax_sp.set_ylabel(f"{metric.upper()} on kept set", fontsize=10)
+    for side in ("top", "right"):
+        ax_sp.spines[side].set_visible(False)
+    ax_sp.spines["left"].set_linewidth(0.6)
+    ax_sp.spines["bottom"].set_linewidth(0.6)
+    ax_sp.grid(alpha=0.18, linewidth=0.4)
+    ax_sp.legend(loc="upper right", fontsize=8, frameon=False)
+
+    ax_se.axhline(0, color="grey", linestyle="--", linewidth=0.8)
+    ax_se.fill_between(sp_g["fraction"], 0.0, sp_g["sparsification_error"],
+                       color="C0", alpha=0.18)
+    ax_se.plot(sp_g["fraction"], sp_g["sparsification_error"],
+               color="C0", linewidth=1.6)
+    ax_se.set_xlim(0, 1)
+    ax_se.set_ylim(bottom=0)
+    ax_se.set_xlabel("fraction removed", fontsize=10)
+    ax_se.set_ylabel(r"sparsification error  $(\mathrm{err}_{\hat\sigma} - \mathrm{err}_{\mathrm{oracle}})$",
+                     fontsize=10)
+    ax_se.text(
+        0.98, 0.95,
+        f"AUSE = {a_val:.4f}\nnormalised = {a_norm:.3f}",
+        transform=ax_se.transAxes, ha="right", va="top",
+        fontsize=8, color="black",
+        bbox=dict(boxstyle="round,pad=0.3", facecolor="white",
+                  edgecolor="lightgrey", linewidth=0.5),
+    )
+    for side in ("top", "right"):
+        ax_se.spines[side].set_visible(False)
+    ax_se.spines["left"].set_linewidth(0.6)
+    ax_se.spines["bottom"].set_linewidth(0.6)
+    ax_se.grid(alpha=0.18, linewidth=0.4)
+
+    fig.suptitle(f"AUSE — {metric.upper()} — model {model_id}", fontsize=11)
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    _save(fig, out_dir, f"sparsification_global_{metric}")
+
+
+def ause_per_marker(ause_csv: Path, out_dir: Path, model_id: str,
+                    metric: str = "rmse") -> None:
+    if not ause_csv.exists():
+        return
+    df = pd.read_csv(ause_csv)
+    pm = df[(df["group_type"] == "per_marker") & (df["metric"] == metric)].copy()
+    if pm.empty:
+        return
+    pm = pm.sort_values("ause", ascending=True)
+    g = df[(df["group_type"] == "global") & (df["metric"] == metric)]
+    g_val = float(g["ause"].iloc[0]) if len(g) else float("nan")
+
+    fig, ax = plt.subplots(figsize=(6.0, max(4.0, 0.22 * len(pm))))
+    ax.barh(pm["group_value"], pm["ause"], color="C0")
+    ax.axvline(g_val, color="C3", linestyle="--",
+               label=f"global AUSE={g_val:.3f}")
+    ax.set_xlabel(f"AUSE ({metric.upper()}, lower is better)")
+    ax.set_title(f"Per-marker AUSE — model {model_id}")
+    ax.legend(loc="lower right", fontsize=9)
+    ax.tick_params(axis="y", labelsize=7)
+    ax.grid(axis="x", alpha=0.3)
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    _save(fig, out_dir, f"ause_per_marker_{metric}")
+
+
 def make_all_figures(out_dir: Path, model_id: str) -> None:
     csv_dir = out_dir / "csv"
     fig_dir = out_dir / "figures"
@@ -646,3 +744,9 @@ def make_all_figures(out_dir: Path, model_id: str) -> None:
     if global_csv.exists():
         roc_curves_per_marker(csv_dir, global_csv, fig_dir, model_id)
         risk_coverage_per_marker(csv_dir, global_csv, fig_dir, model_id)
+    sp_csv = csv_dir / "sparsification_curves.csv"
+    ause_csv = csv_dir / "ause.csv"
+    if sp_csv.exists() and ause_csv.exists():
+        for metric in ("rmse", "mae"):
+            sparsification_global(sp_csv, ause_csv, fig_dir, model_id, metric=metric)
+            ause_per_marker(ause_csv, fig_dir, model_id, metric=metric)

@@ -26,13 +26,15 @@ from pathlib import Path
 
 from .loader import ModelOutputs, assert_marker_overlap, load_model, parse_model_arg
 from .metrics import (
+    build_ause_long,
+    build_ause_summary,
     build_compare_per_marker,
     build_compare_summary,
     build_f1_vs_q_long,
     build_paper_correlation_long,
     build_reliability_long,
 )
-from .plotting import make_all_figures
+from .plotting import make_all_figures, set_palette_overrides
 
 
 def parse_args() -> argparse.Namespace:
@@ -51,6 +53,22 @@ def parse_args() -> argparse.Namespace:
         help="Index of the reference model (deltas computed as other - reference). Default 0.",
     )
     p.add_argument("--no-figures", action="store_true")
+    p.add_argument(
+        "--no-pool",
+        action="store_true",
+        help="Don't load any auroc_pool.{parquet,csv.gz}. Pool-dependent plots "
+             "(risk-coverage, AUROC/AURC per-marker) are skipped, and pool-derived "
+             "metrics (per-marker AUROC/AURC under --restrict-dataset, F1 with HN-global "
+             "thresholds) fall back to per-pc TP/FP sums or are dropped.",
+    )
+    p.add_argument(
+        "--color",
+        action="append",
+        default=None,
+        help="Per-model colour override: '<label>=<color>'. Repeat per model. "
+             "<color> is anything matplotlib accepts (named, '#hex', or rgb tuple). "
+             "Labels not assigned fall back to the default palette.",
+    )
     p.add_argument(
         "--restrict-dataset",
         default=None,
@@ -96,7 +114,12 @@ def run(args: argparse.Namespace) -> None:
     for spec in args.model:
         path, label = parse_model_arg(spec)
         models.append(
-            load_model(path, label=label, restrict_dataset=args.restrict_dataset)
+            load_model(
+                path,
+                label=label,
+                restrict_dataset=args.restrict_dataset,
+                skip_pool=args.no_pool,
+            )
         )
     models = _dedupe_labels(models)
     if args.restrict_dataset:
@@ -152,6 +175,13 @@ def run(args: argparse.Namespace) -> None:
     paper_long = build_paper_correlation_long(models)
     paper_long.to_csv(csv_dir / "loo_scatter_compare.csv", index=False)
 
+    ause_long = build_ause_long(models)
+    if not ause_long.empty:
+        ause_long.to_csv(csv_dir / "ause_curves.csv", index=False)
+    ause_summary_long = build_ause_summary(models)
+    if not ause_summary_long.empty:
+        ause_summary_long.to_csv(csv_dir / "ause_summary.csv", index=False)
+
     run_meta = {
         "models": [
             {
@@ -179,6 +209,27 @@ def run(args: argparse.Namespace) -> None:
         cols = [f"{m.label}={row[m.label]:.4f}" for m in models if m.label in row and row[m.label] == row[m.label]]
         print(f"    {row['metric']:30s}  " + "  ".join(cols))
 
+    palette_overrides: dict[str, str] = {}
+    for spec in (args.color or []):
+        if "=" not in spec:
+            raise ValueError(
+                f"--color must be '<label>=<color>', got {spec!r}"
+            )
+        label, color = spec.split("=", 1)
+        palette_overrides[label] = color
+    known_labels = {m.label for m in models}
+    unmatched = [lab for lab in palette_overrides if lab not in known_labels]
+    if unmatched:
+        print(
+            f"[compare] WARN: --color label(s) not in --model set: {unmatched}\n"
+            f"          known labels: {sorted(known_labels)}"
+        )
+    set_palette_overrides(palette_overrides)
+    if palette_overrides:
+        print("[compare] palette overrides:")
+        for k, v in palette_overrides.items():
+            print(f"    {k!r:40s} -> {v}")
+
     if not args.no_figures:
         make_all_figures(
             models=models,
@@ -188,6 +239,9 @@ def run(args: argparse.Namespace) -> None:
             paper_long=paper_long,
             out_dir=fig_dir,
             reference_idx=args.reference,
+            ause_long=ause_long,
+            ause_summary_long=ause_summary_long,
+            skip_pool=args.no_pool,
         )
         print(f"[compare] figures in {fig_dir}")
 

@@ -83,7 +83,56 @@ def build_compare_summary(models: list[ModelOutputs], reference_idx: int = 0) ->
                 continue
             row[f"delta__{m.label}__minus__{ref_label}"] = row.get(m.label, float("nan")) - ref_v
 
+    # AUSE rows (rmse + mae, raw + normalised) drawn from each model's ause.csv.
+    for m in models:
+        if m.ause is None or m.ause.empty:
+            continue
+        g = m.ause[m.ause["group_type"] == "global"]
+        for _, r in g.iterrows():
+            metric = str(r["metric"])
+            for stem, val_col in (
+                (f"ause_{metric}", "ause"),
+                (f"ause_{metric}_normalised", "ause_normalised"),
+            ):
+                existing = next((row for row in rows if row["metric"] == stem), None)
+                if existing is None:
+                    existing = {"metric": stem}
+                    rows.append(existing)
+                existing[m.label] = float(r[val_col])
+    for row in rows:
+        if not row["metric"].startswith("ause_"):
+            continue
+        ref_v = row.get(ref_label, float("nan"))
+        for i, m in enumerate(models):
+            if i == reference_idx:
+                continue
+            row[f"delta__{m.label}__minus__{ref_label}"] = row.get(m.label, float("nan")) - ref_v
+
     return pd.DataFrame(rows)
+
+
+def build_ause_long(models: list[ModelOutputs]) -> pd.DataFrame:
+    """Long-format sparsification curves across models."""
+    parts = []
+    for m in models:
+        if m.sparsification_curves is None or m.sparsification_curves.empty:
+            continue
+        df = m.sparsification_curves.copy()
+        df["label"] = m.label
+        parts.append(df)
+    return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
+
+
+def build_ause_summary(models: list[ModelOutputs]) -> pd.DataFrame:
+    """Long-format AUSE summary across models (one row per (label, group, metric))."""
+    parts = []
+    for m in models:
+        if m.ause is None or m.ause.empty:
+            continue
+        df = m.ause.copy()
+        df["label"] = m.label
+        parts.append(df)
+    return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
 
 
 def build_compare_per_marker(

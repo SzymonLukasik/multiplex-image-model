@@ -30,6 +30,8 @@ class ModelOutputs:
     paper_correlation: pd.DataFrame
     binary_mask: pd.DataFrame
     run_metadata: dict
+    ause: pd.DataFrame | None = None
+    sparsification_curves: pd.DataFrame | None = None
 
     @property
     def csv_dir(self) -> Path:
@@ -40,6 +42,7 @@ def load_model(
     output_dir: Path,
     label: str | None = None,
     restrict_dataset: str | None = None,
+    skip_pool: bool = False,
 ) -> ModelOutputs:
     """Load all CSVs for one model.
 
@@ -75,6 +78,11 @@ def load_model(
     paper_correlation = pd.read_csv(required["paper_correlation"])
     binary_mask = pd.read_csv(required["binary_mask"])
 
+    ause_path = csv_dir / "ause.csv"
+    sp_path = csv_dir / "sparsification_curves.csv"
+    ause_df = pd.read_csv(ause_path) if ause_path.exists() else None
+    sparsification_df = pd.read_csv(sp_path) if sp_path.exists() else None
+
     if restrict_dataset:
         global_metrics, coverage_curves, paper_correlation, binary_mask = _restrict_to_dataset(
             output_dir=output_dir,
@@ -85,9 +93,21 @@ def load_model(
             paper_correlation=paper_correlation,
             binary_mask=binary_mask,
             dataset_name=restrict_dataset,
+            skip_pool=skip_pool,
         )
         meta = dict(meta)
         meta["restrict_dataset"] = restrict_dataset
+        # Re-aggregate AUSE from the HN-restricted pool so it's apples-to-apples.
+        if skip_pool:
+            ause_df, sparsification_df = None, None
+        else:
+            ause_df, sparsification_df = _restrict_ause(
+                output_dir=output_dir,
+                model_id=model_id,
+                dataset_name=restrict_dataset,
+                fallback_ause=ause_df,
+                fallback_sparsification=sparsification_df,
+            )
 
     return ModelOutputs(
         label=label or model_id,
@@ -98,6 +118,8 @@ def load_model(
         paper_correlation=paper_correlation,
         binary_mask=binary_mask,
         run_metadata=meta,
+        ause=ause_df,
+        sparsification_curves=sparsification_df,
     )
 
 
@@ -489,6 +511,7 @@ def _restrict_to_dataset(
     paper_correlation: pd.DataFrame,
     binary_mask: pd.DataFrame,
     dataset_name: str,
+    skip_pool: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Replace each frame's "global"/"per_marker" rows with HN-restricted ones."""
     per_pc_path = csv_dir / "per_patch_channel.csv"
@@ -530,9 +553,10 @@ def _restrict_to_dataset(
 
     # 1) global_metrics: re-aggregate global + per-marker; fill AUROC from pool.
     new_global = _build_aggregated_global_metrics(per_pc, model_id=model_id)
-    new_global = _augment_global_with_pool_auroc(
-        new_global, output_dir=output_dir, dataset_name=dataset_name
-    )
+    if not skip_pool:
+        new_global = _augment_global_with_pool_auroc(
+            new_global, output_dir=output_dir, dataset_name=dataset_name
+        )
     # Keep any original per_dataset rows so downstream code that may inspect
     # them still works; just drop the old "global" + "per_marker" rows.
     keep_other = global_metrics[
@@ -551,8 +575,11 @@ def _restrict_to_dataset(
     #    summing per-pc TP/FP/FN/TN columns (within-patch thresholds) when the
     #    pool is missing/old. The fallback uses different thresholds but is
     #    still informative and lets every model render.
-    new_bm = _build_aggregated_binary_mask(
-        output_dir=output_dir, model_id=model_id, dataset_name=dataset_name
+    new_bm = (
+        None if skip_pool
+        else _build_aggregated_binary_mask(
+            output_dir=output_dir, model_id=model_id, dataset_name=dataset_name
+        )
     )
     used_fallback = False
     if new_bm is None or new_bm.empty:
@@ -580,6 +607,51 @@ def _restrict_to_dataset(
         paper_out = paper_correlation
 
     return global_metrics_out, coverage_out, paper_out, binary_mask_out
+
+
+def _restrict_ause(
+    output_dir: Path,
+    model_id: str,
+    dataset_name: str,
+    fallback_ause: pd.DataFrame | None,
+    fallback_sparsification: pd.DataFrame | None,
+) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
+    """Re-aggregate AUSE from the dataset-restricted pixel pool.
+
+    If the pool is unavailable (or lacks the dataset column) returns the
+    pre-loaded full-set AUSE/sparsification frames as-is.
+    """
+    pool_paths = [
+        output_dir / "csv" / "auroc_pool.parquet",
+        output_dir / "csv" / "auroc_pool.csv.gz",
+    ]
+    pool: pd.DataFrame | None = None
+    for p in pool_paths:
+        if p.exists():
+            try:
+                pool = pd.read_parquet(p) if p.suffix == ".parquet" else pd.read_csv(p)
+                break
+            except Exception:
+                continue
+    if pool is None or pool.empty:
+        return fallback_ause, fallback_sparsification
+    if "dataset" not in pool.columns:
+        per_pc_path = output_dir / "csv" / "per_patch_channel.csv"
+        if per_pc_path.exists():
+            ds_seen = pd.read_csv(per_pc_path, usecols=["dataset_name"])["dataset_name"].unique()
+            if len(ds_seen) == 1 and str(ds_seen[0]) == dataset_name:
+                pool = pool.assign(dataset=dataset_name)
+            else:
+                return fallback_ause, fallback_sparsification
+        else:
+            return fallback_ause, fallback_sparsification
+    pool_g = pool[pool["dataset"] == dataset_name]
+    if len(pool_g) < 2:
+        return fallback_ause, fallback_sparsification
+
+    # Local import to avoid a circular dep at module load.
+    from calibration.metrics_aggregate import build_ause as _build_ause
+    return _build_ause(pool_g, model_id=model_id)
 
 
 def assert_marker_overlap(models: list[ModelOutputs]) -> list[str]:

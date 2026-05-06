@@ -24,6 +24,11 @@ from .config import (
     alpha_col,
     quantile_cols,
 )
+from .metrics_pixel import ause as _ause
+
+
+AUSE_METRICS = ("rmse", "mae")
+AUSE_N_POINTS = 100
 
 
 GROUPINGS = (
@@ -251,3 +256,73 @@ def build_binary_mask_analysis(
                     }
                 )
     return pd.DataFrame.from_records(rows)
+
+
+# ---------------------------------------------------------------------------
+# AUSE — sparsification-error area, computed from the AUROC pool
+# ---------------------------------------------------------------------------
+
+def _ause_groups(pool: pd.DataFrame):
+    """Yield (group_type, group_value, sub_df) for AUSE aggregation."""
+    yield "global", "all", pool
+    if "marker" in pool.columns:
+        for marker, sub in pool.groupby("marker"):
+            yield "per_marker", str(marker), sub
+
+
+def build_ause(pool: pd.DataFrame, model_id: str, seed: int = 0) -> tuple[
+    pd.DataFrame, pd.DataFrame
+]:
+    """Compute AUSE (RMSE & MAE) at global + per-marker level.
+
+    Returns `(ause_df, sparsification_curves_df)`. Per-marker groups with
+    fewer than `MIN_PIXELS_PER_MARKER_AUROC` pixels are skipped (consistent
+    with AUROC).
+    """
+    rows_summary: list[dict] = []
+    rows_curves: list[dict] = []
+    for group_type, group_value, sub in _ause_groups(pool):
+        n = len(sub)
+        if group_type == "per_marker" and n < MIN_PIXELS_PER_MARKER_AUROC:
+            continue
+        if n < 2:
+            continue
+        sigma = sub["sigma"].to_numpy(dtype=np.float64)
+        abs_r = sub["abs_residual"].to_numpy(dtype=np.float64)
+        for metric in AUSE_METRICS:
+            res = _ause(sigma, abs_r, metric=metric, n_points=AUSE_N_POINTS, seed=seed)
+            rows_summary.append(
+                {
+                    "model_id": model_id,
+                    "group_type": group_type,
+                    "group_value": group_value,
+                    "metric": metric,
+                    "ause": res["ause"],
+                    "ause_random": res["ause_random"],
+                    "ause_normalised": res["ause_normalised"],
+                    "n_pixels": int(n),
+                }
+            )
+            for f, e_s, e_o, e_r, se in zip(
+                res["fractions"],
+                res["err_sigma"],
+                res["err_oracle"],
+                res["err_random"],
+                res["sparsification_error"],
+            ):
+                rows_curves.append(
+                    {
+                        "model_id": model_id,
+                        "group_type": group_type,
+                        "group_value": group_value,
+                        "metric": metric,
+                        "fraction": float(f),
+                        "err_sigma": float(e_s),
+                        "err_oracle": float(e_o),
+                        "err_random": float(e_r),
+                        "sparsification_error": float(se),
+                    }
+                )
+    ause_df = pd.DataFrame.from_records(rows_summary)
+    curves_df = pd.DataFrame.from_records(rows_curves)
+    return ause_df, curves_df

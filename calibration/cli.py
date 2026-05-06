@@ -25,6 +25,7 @@ from . import config as cfg
 from .auroc_subsample import cap_pool, concat_pools
 from .io_utils import chunked, list_npz_files, parse_metadata
 from .metrics_aggregate import (
+    build_ause,
     build_binary_mask_analysis,
     build_coverage_curves,
     build_global_metrics,
@@ -194,6 +195,18 @@ def run(args: argparse.Namespace) -> None:
 
     binary = build_binary_mask_analysis(per_pc, pool, args.model_id)
     binary.to_csv(csv_dir / "binary_mask_analysis.csv", index=False)
+
+    ause_df, sparsification_df = build_ause(pool, args.model_id, seed=args.seed)
+    ause_df.to_csv(csv_dir / "ause.csv", index=False)
+    sparsification_df.to_csv(csv_dir / "sparsification_curves.csv", index=False)
+    if not ause_df.empty:
+        g = ause_df[(ause_df["group_type"] == "global") & (ause_df["metric"] == "rmse")]
+        if len(g):
+            row = g.iloc[0]
+            print(
+                f"[calibration] AUSE_rmse(global)={row['ause']:.4f}  "
+                f"normalised={row['ause_normalised']:.3f}  n={int(row['n_pixels']):,}"
+            )
 
     run_meta = {
         "model_id": args.model_id,

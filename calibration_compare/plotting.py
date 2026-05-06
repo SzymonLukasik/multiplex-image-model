@@ -40,6 +40,25 @@ def _colors(n: int) -> list[str]:
     return [cmap(i / max(1, n - 1)) for i in range(n)]
 
 
+# ---------------------------------------------------------------------------
+# Per-label palette overrides. The CLI calls `set_palette_overrides({label: color})`
+# before plotting; every figure then resolves colors via `_colors_for_models`
+# so each model gets its assigned colour wherever it appears.
+# ---------------------------------------------------------------------------
+
+_PALETTE_OVERRIDES: dict[str, str] = {}
+
+
+def set_palette_overrides(overrides: dict[str, str]) -> None:
+    _PALETTE_OVERRIDES.clear()
+    _PALETTE_OVERRIDES.update({str(k): str(v) for k, v in overrides.items()})
+
+
+def _colors_for_models(models: list[ModelOutputs]) -> list[str]:
+    base = _colors(len(models))
+    return [_PALETTE_OVERRIDES.get(m.label, base[i]) for i, m in enumerate(models)]
+
+
 def reliability_global_compare(
     models: list[ModelOutputs], out_dir: Path
 ) -> None:
@@ -53,7 +72,7 @@ def reliability_global_compare(
     from matplotlib.ticker import MultipleLocator
 
     fig, ax = plt.subplots(figsize=(4.8, 4.4))
-    colors = _colors(len(models))
+    colors = _colors_for_models(models)
 
     ax.plot(
         [0, 1], [0, 1],
@@ -140,7 +159,7 @@ def reliability_global_compare_paper(
         figsize=(8.6, 3.8),
         gridspec_kw={"width_ratios": [1.0, 1.0], "wspace": 0.28},
     )
-    colors = _colors(len(models))
+    colors = _colors_for_models(models)
 
     # ---------- Panel 1: reliability curve ----------
     ax_rel.plot(
@@ -236,7 +255,7 @@ def reliability_per_marker_compare(
     fig, axes = plt.subplots(rows, cols, figsize=(2.4 * cols, 2.4 * rows), sharex=True, sharey=True)
     axes = np.atleast_2d(axes).reshape(rows, cols)
 
-    colors = _colors(len(models))
+    colors = _colors_for_models(models)
     for i, marker in enumerate(order):
         ax = axes[i // cols, i % cols]
         ax.plot([0, 1], [0, 1], color="grey", linestyle="--", linewidth=0.8)
@@ -304,7 +323,7 @@ def ece_per_marker_compare(
     df["max_ece"] = df[cols].max(axis=1)
     df = df.sort_values("max_ece", ascending=True)
 
-    colors = _colors(len(models))
+    colors = _colors_for_models(models)
     n_markers = len(df)
     bar_h = 0.8 / len(models)
     y = np.arange(n_markers)
@@ -408,7 +427,7 @@ def f1_per_marker_compare(
     quantiles: tuple[float, ...] = (0.90, 0.95, 0.99),
 ) -> None:
     fig, axes = plt.subplots(1, len(quantiles), figsize=(6.0 * len(quantiles), max(4.5, 0.22 * len(compare_per_marker))), squeeze=False)
-    colors = _colors(len(models))
+    colors = _colors_for_models(models)
     for ax, q in zip(axes[0], quantiles):
         qtag = f"q{int(round(q*100)):02d}"
         present = [
@@ -508,7 +527,7 @@ def f1_global_vs_q_compare(
     from matplotlib.ticker import MultipleLocator
 
     fig, ax = plt.subplots(figsize=(6.0, 4.5))
-    colors = _colors(len(models))
+    colors = _colors_for_models(models)
     for m, color in zip(models, colors):
         sub = f1_long[f1_long["label"] == m.label].sort_values("quantile")
         ax.plot(sub["quantile"], sub["f1"], color=color, marker="o", label=m.label)
@@ -550,7 +569,7 @@ def sharpness_vs_ece_compare(
     out_dir: Path,
     reference_idx: int = 0,
 ) -> None:
-    colors = _colors(len(models))
+    colors = _colors_for_models(models)
     fig, ax = plt.subplots(figsize=(6.0, 5.5))
     for m, color in zip(models, colors):
         s_col = f"sharpness_mean_sigma__{m.label}"
@@ -629,7 +648,7 @@ def sharpness_vs_ece_compare_paper(
         sharex=True, sharey=True,
         squeeze=False,
     )
-    colors = _colors(len(models))
+    colors = _colors_for_models(models)
     color_for = {m.label: c for m, c in zip(models, colors)}
 
     median_x = float(x_concat.median())
@@ -695,7 +714,7 @@ def loo_scatter_compare(
         return
     n = len(models)
     fig, axes = plt.subplots(1, n, figsize=(5.0 * n, 5.0), squeeze=False, sharex=True, sharey=True)
-    colors = _colors(n)
+    colors = _colors_for_models(models)
     x_all = paper_long["log_var_summary"].to_numpy()
     y_all = paper_long["log_mae_summary"].to_numpy()
     if x_all.size:
@@ -708,28 +727,45 @@ def loo_scatter_compare(
         sub = paper_long[paper_long["label"] == m.label]
         x = sub["log_var_summary"].to_numpy()
         y = sub["log_mae_summary"].to_numpy()
-        ax.scatter(x, y, s=2, alpha=0.18, color=color, linewidths=0)
+        # Bigger, slightly more opaque dots so each (patch, channel) is
+        # individually visible rather than a haze; thin white edge stops
+        # overlapping points from merging into amorphous blobs.
+        ax.scatter(
+            x, y,
+            s=8, alpha=0.45, color=color,
+            edgecolors="white", linewidths=0.25,
+            rasterized=True, zorder=2,
+        )
         if x.size >= 2:
             lr = linregress(x, y)
             xs = np.linspace(x_lo, x_hi, 200)
+            # Lighter trend line: thin grey, dashed — annotates the trend
+            # without dominating the ink budget.
             ax.plot(
                 xs,
                 lr.intercept + lr.slope * xs,
-                color="black",
-                linewidth=1.4,
-                label=f"slope={lr.slope:.2f}",
+                color="#444444",
+                linewidth=0.9,
+                linestyle="--",
+                label=f"slope = {lr.slope:.2f}",
+                zorder=3,
             )
             r = float(np.corrcoef(x, y)[0, 1])
         else:
             r = float("nan")
         ax.set_xlim(x_lo, x_hi)
         ax.set_ylim(y_lo, y_hi)
-        ax.set_xlabel(r"$\log\,\overline{\sigma^{2}}$")
-        ax.set_ylabel(r"$\log\,\mathrm{MAE}$")
-        ax.set_title(f"{m.label}\nPearson r = {r:.3f}")
-        ax.grid(alpha=0.3)
-        ax.legend(loc="lower right", fontsize=8)
-    fig.suptitle("Figure-5-style LOO scatter (shared axes)", fontsize=11)
+        ax.set_xlabel(r"$\log\,\overline{\sigma^{2}}$", fontsize=10)
+        ax.set_ylabel(r"$\log\,\mathrm{MAE}$", fontsize=10)
+        ax.set_title(f"{m.label}\nPearson r = {r:.3f}", fontsize=10)
+        ax.tick_params(axis="both", labelsize=8)
+        for side in ("top", "right"):
+            ax.spines[side].set_visible(False)
+        ax.spines["left"].set_linewidth(0.6)
+        ax.spines["bottom"].set_linewidth(0.6)
+        ax.grid(alpha=0.18, linewidth=0.4)
+        ax.legend(loc="lower right", fontsize=8, frameon=False, handlelength=1.4)
+    # fig.suptitle("Figure-5-style LOO scatter (shared axes)", fontsize=11)
     fig.tight_layout()
     _save(fig, out_dir, "loo_scatter_compare")
 
@@ -774,7 +810,7 @@ def _reliability_top_n_grid(
     fig, axes = plt.subplots(
         rows, cols, figsize=(3.2 * cols, 3.0 * rows), squeeze=False, sharex=True, sharey=True
     )
-    colors = _colors(len(models))
+    colors = _colors_for_models(models)
     for i, marker in enumerate(top):
         ax = axes[i // cols][i % cols]
         ax.plot([0, 1], [0, 1], color="grey", linestyle="--", linewidth=0.8)
@@ -857,7 +893,7 @@ def coverage_gap_compare(models: list[ModelOutputs], out_dir: Path) -> None:
     sinusoidal coverage gap that the diagonal-axes reliability plot smooths over."""
     fig, ax = plt.subplots(figsize=(6.0, 4.5))
     ax.axhline(0, color="grey", linestyle="--", linewidth=0.8)
-    colors = _colors(len(models))
+    colors = _colors_for_models(models)
     for m, color in zip(models, colors):
         cov = m.coverage_curves[m.coverage_curves["group_type"] == "global"].sort_values("alpha")
         g = m.global_metrics[m.global_metrics["group_type"] == "global"]
@@ -895,7 +931,7 @@ def auroc_aurc_per_marker_compare(
     ref_label = models[reference_idx].label
     df = df.sort_values(f"auroc_pixel_top10pct__{ref_label}", ascending=True)
 
-    colors = _colors(len(models))
+    colors = _colors_for_models(models)
     n_markers = len(df)
     bar_h = 0.8 / len(models)
     y = np.arange(n_markers)
@@ -947,7 +983,7 @@ def nll_per_marker_compare(
     ref_label = models[reference_idx].label
     df = df.sort_values(f"mean_nll__{ref_label}", ascending=True)
 
-    colors = _colors(len(models))
+    colors = _colors_for_models(models)
     n_markers = len(df)
     bar_h = 0.8 / len(models)
     y = np.arange(n_markers)
@@ -964,6 +1000,89 @@ def nll_per_marker_compare(
     ax.grid(axis="x", alpha=0.3)
     ax.legend(loc="lower right", fontsize=8)
     _save(fig, out_dir, "nll_per_marker_compare")
+
+
+def nll_per_marker_compare_paper(
+    compare_per_marker: pd.DataFrame,
+    models: list[ModelOutputs],
+    out_dir: Path,
+    reference_idx: int = 0,
+    clip_nll: tuple[float, float] | None = (-4.0, 1.0),
+) -> None:
+    """NeurIPS-ready paired-bar variant.
+
+    - hidden top/right spines, thin remaining ones
+    - frameless legend; 0-line as a thin guide
+    - optional symmetric clip on absurd NLL outliers (DNA1 spikes to +6.65 in
+      612 zero-shot — the bar then dwarfs every other marker). Clipped values
+      get an annotation `→ 6.65` at the clip edge so nothing is hidden.
+    """
+    from matplotlib.ticker import MaxNLocator
+
+    cols = [f"mean_nll__{m.label}" for m in models]
+    if any(c not in compare_per_marker.columns for c in cols):
+        return
+    df = compare_per_marker.dropna(subset=cols).copy()
+    if df.empty:
+        return
+    ref_label = models[reference_idx].label
+    df = df.sort_values(f"mean_nll__{ref_label}", ascending=True)
+
+    colors = _colors_for_models(models)
+    color_for = {m.label: c for m, c in zip(models, colors)}
+    n_markers = len(df)
+    bar_h = 0.8 / len(models)
+    y = np.arange(n_markers)
+
+    fig, ax = plt.subplots(figsize=(6.4, max(4.5, 0.26 * n_markers)))
+    for i, m in enumerate(models):
+        offset = (i - (len(models) - 1) / 2) * bar_h
+        vals = df[f"mean_nll__{m.label}"].to_numpy(dtype=float)
+        if clip_nll is not None:
+            lo, hi = clip_nll
+            clipped = np.clip(vals, lo, hi)
+        else:
+            clipped = vals
+        ax.barh(
+            y + offset, clipped, height=bar_h,
+            color=color_for[m.label], edgecolor="white", linewidth=0.4,
+            label=m.label, zorder=2,
+        )
+        # Annotate values that got clipped so no information is hidden.
+        if clip_nll is not None:
+            for yi, raw, c in zip(y + offset, vals, clipped):
+                if not np.isfinite(raw) or raw == c:
+                    continue
+                ax.annotate(
+                    f"→ {raw:.2f}",
+                    xy=(c, yi),
+                    xytext=(3 if raw > 0 else -3, 0),
+                    textcoords="offset points",
+                    fontsize=6.5,
+                    color=color_for[m.label],
+                    va="center",
+                    ha="left" if raw > 0 else "right",
+                )
+
+    ax.axvline(0, color="grey", linestyle="--", linewidth=0.6, zorder=1)
+    ax.set_yticks(y)
+    ax.set_yticklabels(df["marker"].tolist(), fontsize=7)
+    ax.set_ylim(-0.5, n_markers - 0.5)
+    if clip_nll is not None:
+        ax.set_xlim(*clip_nll)
+    ax.set_xlabel("mean Gaussian NLL  (lower is better)", fontsize=10)
+    ax.xaxis.set_major_locator(MaxNLocator(nbins=6))
+    ax.tick_params(axis="x", labelsize=8)
+
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    ax.spines["left"].set_linewidth(0.6)
+    ax.spines["bottom"].set_linewidth(0.6)
+    ax.grid(axis="x", alpha=0.18, linewidth=0.4)
+    ax.legend(loc="lower right", fontsize=8, frameon=False, handlelength=1.4)
+
+    fig.tight_layout()
+    _save(fig, out_dir, "nll_per_marker_compare_paper")
 
 
 def _risk_coverage_arrays(sigma: np.ndarray, sq: np.ndarray) -> tuple[np.ndarray, np.ndarray, float]:
@@ -985,7 +1104,7 @@ def risk_coverage_global_compare(models: list[ModelOutputs], out_dir: Path) -> N
     signal.
     """
     fig, ax = plt.subplots(figsize=(6.0, 4.5))
-    colors = _colors(len(models))
+    colors = _colors_for_models(models)
     for m, color in zip(models, colors):
         pool = load_pool(m)
         if pool is None or pool.empty:
@@ -1009,6 +1128,155 @@ def risk_coverage_global_compare(models: list[ModelOutputs], out_dir: Path) -> N
     _save(fig, out_dir, "risk_coverage_global_compare")
 
 
+def sparsification_global_compare(
+    ause_long: pd.DataFrame,
+    ause_summary_long: pd.DataFrame,
+    models: list[ModelOutputs],
+    out_dir: Path,
+    metric: str = "rmse",
+) -> None:
+    """Two-panel: sparsification curves (kept-set RMSE) + sparsification error.
+
+    NeurIPS-clean: hidden top/right spines, frameless legend, oracle as a thin
+    grey reference line. AUSE is the legend label per model.
+    """
+    if ause_long.empty:
+        return
+    sub = ause_long[
+        (ause_long["group_type"] == "global") & (ause_long["metric"] == metric)
+    ]
+    if sub.empty:
+        return
+
+    from matplotlib.ticker import MaxNLocator
+
+    fig, (ax_sp, ax_se) = plt.subplots(
+        1, 2, figsize=(8.6, 3.6),
+        gridspec_kw={"width_ratios": [1.0, 1.0], "wspace": 0.28},
+    )
+    colors = _colors_for_models(models)
+    color_for = {m.label: c for m, c in zip(models, colors)}
+
+    # Panel 1 — kept-set RMSE / MAE
+    # Plot the reference (first) model's oracle line so the figure isn't
+    # cluttered; oracle curves across models are nearly identical on the
+    # same data slice.
+    first_label = next(iter(sub["label"].unique()))
+    first = sub[sub["label"] == first_label].sort_values("fraction")
+    ax_sp.plot(first["fraction"], first["err_oracle"],
+               color="grey", linestyle="-", linewidth=1.0, alpha=0.9, label="oracle",
+               zorder=1)
+    for m in models:
+        sm = sub[sub["label"] == m.label].sort_values("fraction")
+        if sm.empty:
+            continue
+        ause_val = float("nan")
+        if not ause_summary_long.empty:
+            row = ause_summary_long[
+                (ause_summary_long["label"] == m.label)
+                & (ause_summary_long["group_type"] == "global")
+                & (ause_summary_long["metric"] == metric)
+            ]
+            if len(row):
+                ause_val = float(row["ause"].iloc[0])
+        ax_sp.plot(
+            sm["fraction"], sm["err_sigma"],
+            color=color_for[m.label], linewidth=1.6, zorder=3,
+            label=f"{m.label}  (AUSE={ause_val:.4f})",
+        )
+    ax_sp.set_xlim(0, 1)
+    ax_sp.set_ylim(bottom=0)
+    ax_sp.set_xlabel("fraction removed (highest σ̂ first)", fontsize=10)
+    ax_sp.set_ylabel(f"{metric.upper()} on kept set", fontsize=10)
+    for side in ("top", "right"):
+        ax_sp.spines[side].set_visible(False)
+    ax_sp.spines["left"].set_linewidth(0.6)
+    ax_sp.spines["bottom"].set_linewidth(0.6)
+    ax_sp.xaxis.set_major_locator(MaxNLocator(nbins=5))
+    ax_sp.tick_params(axis="both", labelsize=8)
+    ax_sp.grid(alpha=0.18, linewidth=0.4)
+    ax_sp.legend(loc="upper right", fontsize=7.5, frameon=False)
+
+    # Panel 2 — sparsification error (the integrand)
+    ax_se.axhline(0, color="grey", linestyle="--", linewidth=0.8, zorder=1)
+    for m in models:
+        sm = sub[sub["label"] == m.label].sort_values("fraction")
+        if sm.empty:
+            continue
+        ax_se.plot(
+            sm["fraction"], sm["sparsification_error"],
+            color=color_for[m.label], linewidth=1.6, label=m.label, zorder=3,
+        )
+    ax_se.set_xlim(0, 1)
+    ax_se.set_ylim(bottom=0)
+    ax_se.set_xlabel("fraction removed", fontsize=10)
+    ax_se.set_ylabel(r"sparsification error", fontsize=10)
+    for side in ("top", "right"):
+        ax_se.spines[side].set_visible(False)
+    ax_se.spines["left"].set_linewidth(0.6)
+    ax_se.spines["bottom"].set_linewidth(0.6)
+    ax_se.xaxis.set_major_locator(MaxNLocator(nbins=5))
+    ax_se.tick_params(axis="both", labelsize=8)
+    ax_se.grid(alpha=0.18, linewidth=0.4)
+    ax_se.legend(loc="upper right", fontsize=7.5, frameon=False)
+
+    fig.tight_layout()
+    _save(fig, out_dir, f"sparsification_global_compare_{metric}")
+
+
+def ause_per_marker_compare(
+    ause_summary_long: pd.DataFrame,
+    models: list[ModelOutputs],
+    out_dir: Path,
+    metric: str = "rmse",
+) -> None:
+    if ause_summary_long.empty:
+        return
+    sub = ause_summary_long[
+        (ause_summary_long["group_type"] == "per_marker")
+        & (ause_summary_long["metric"] == metric)
+    ]
+    if sub.empty:
+        return
+    wide = sub.pivot_table(
+        index="group_value", columns="label", values="ause", aggfunc="first"
+    )
+    cols = [m.label for m in models if m.label in wide.columns]
+    if not cols:
+        return
+    wide = wide[cols].dropna(how="all")
+    if wide.empty:
+        return
+    sort_col = cols[0]
+    wide = wide.sort_values(sort_col, ascending=True)
+
+    colors = _colors_for_models(models)
+    color_for = {m.label: c for m, c in zip(models, colors)}
+
+    n_markers = len(wide)
+    n_present = len(cols)
+    bar_h = 0.8 / max(n_present, 1)
+    y = np.arange(n_markers)
+
+    fig, ax = plt.subplots(figsize=(7.0, max(4.5, 0.25 * n_markers)))
+    for i, lab in enumerate(cols):
+        offset = (i - (n_present - 1) / 2) * bar_h
+        ax.barh(y + offset, wide[lab], height=bar_h,
+                color=color_for[lab], label=lab)
+    ax.set_yticks(y)
+    ax.set_yticklabels(wide.index.tolist(), fontsize=7)
+    ax.set_xlabel(f"AUSE ({metric.upper()}, lower is better)")
+    ax.set_title(f"Per-marker AUSE — {metric.upper()}")
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    ax.spines["left"].set_linewidth(0.6)
+    ax.spines["bottom"].set_linewidth(0.6)
+    ax.grid(axis="x", alpha=0.25, linewidth=0.5)
+    ax.legend(loc="lower right", fontsize=8, frameon=False)
+    fig.tight_layout()
+    _save(fig, out_dir, f"ause_per_marker_compare_{metric}")
+
+
 def make_all_figures(
     models: list[ModelOutputs],
     markers: list[str],
@@ -1017,6 +1285,9 @@ def make_all_figures(
     paper_long: pd.DataFrame,
     out_dir: Path,
     reference_idx: int = 0,
+    ause_long: pd.DataFrame | None = None,
+    ause_summary_long: pd.DataFrame | None = None,
+    skip_pool: bool = False,
 ) -> None:
     reliability_global_compare(models, out_dir)
     reliability_global_compare_paper(models, out_dir)
@@ -1032,6 +1303,15 @@ def make_all_figures(
     loo_scatter_compare(paper_long, models, out_dir)
     reliability_top_degraders(compare_per_marker, models, out_dir, reference_idx)
     reliability_top_improvers(compare_per_marker, models, out_dir, reference_idx)
-    auroc_aurc_per_marker_compare(compare_per_marker, models, out_dir, reference_idx)
     nll_per_marker_compare(compare_per_marker, models, out_dir, reference_idx)
-    risk_coverage_global_compare(models, out_dir)
+    nll_per_marker_compare_paper(compare_per_marker, models, out_dir, reference_idx)
+    # Pool-dependent plots: AUROC/AURC per-marker draws from columns whose
+    # values come from the pool at single-model time, and risk_coverage opens
+    # the pool directly. Both should be silenced when --no-pool is set.
+    if not skip_pool:
+        auroc_aurc_per_marker_compare(compare_per_marker, models, out_dir, reference_idx)
+        risk_coverage_global_compare(models, out_dir)
+    if ause_long is not None and ause_summary_long is not None and not ause_long.empty:
+        for metric in ("rmse", "mae"):
+            sparsification_global_compare(ause_long, ause_summary_long, models, out_dir, metric=metric)
+            ause_per_marker_compare(ause_summary_long, models, out_dir, metric=metric)
