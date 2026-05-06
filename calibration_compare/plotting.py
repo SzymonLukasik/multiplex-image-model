@@ -28,7 +28,7 @@ DEFAULT_PALETTE = (
 
 def _save(fig: plt.Figure, out_dir: Path, stem: str) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_dir / f"{stem}.png", dpi=150, bbox_inches="tight")
+    fig.savefig(out_dir / f"{stem}.png", dpi=300, bbox_inches="tight")
     fig.savefig(out_dir / f"{stem}.pdf", bbox_inches="tight")
     plt.close(fig)
 
@@ -43,29 +43,172 @@ def _colors(n: int) -> list[str]:
 def reliability_global_compare(
     models: list[ModelOutputs], out_dir: Path
 ) -> None:
-    fig, ax = plt.subplots(figsize=(5.2, 5.2))
-    ax.plot([0, 1], [0, 1], color="grey", linestyle="--", linewidth=1, label="ideal")
+    """NeurIPS-ready reliability diagram with a coverage-gap inset.
+
+    Main panel keeps the canonical y=x reliability view so readers see
+    that all curves track the diagonal. The inset shows the residual
+    (empirical − nominal) on a magnified y-axis where the per-model
+    differences — invisible at unit-square scale — become legible.
+    """
+    from matplotlib.ticker import MultipleLocator
+
+    fig, ax = plt.subplots(figsize=(4.8, 4.4))
     colors = _colors(len(models))
+
+    ax.plot(
+        [0, 1], [0, 1],
+        color="grey", linestyle="--", linewidth=0.9, zorder=1,
+        label=r"perfect calibration ($y=\alpha$)",
+    )
     for m, color in zip(models, colors):
-        cov = m.coverage_curves[m.coverage_curves["group_type"] == "global"].sort_values("alpha")
+        cov = (
+            m.coverage_curves[m.coverage_curves["group_type"] == "global"]
+            .sort_values("alpha")
+        )
         g = m.global_metrics[m.global_metrics["group_type"] == "global"]
         ece = float(g["ece_reg"].iloc[0]) if len(g) else float("nan")
         ax.plot(
-            cov["alpha"],
-            cov["empirical_coverage"],
-            color=color,
-            linewidth=2,
+            cov["alpha"], cov["empirical_coverage"],
+            color=color, linewidth=1.6, zorder=3,
             label=f"{m.label}  (ECE={ece:.3f})",
         )
+
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
-    ax.set_xlabel("nominal coverage α")
-    ax.set_ylabel("empirical coverage")
-    ax.set_title("Reliability — global (LOO)")
+    ax.set_xlabel(r"nominal coverage $\alpha$", fontsize=10)
+    ax.set_ylabel("empirical coverage", fontsize=10)
     ax.set_aspect("equal", adjustable="box")
-    ax.legend(loc="lower right", fontsize=8)
-    ax.grid(alpha=0.3)
+    ax.xaxis.set_major_locator(MultipleLocator(0.2))
+    ax.yaxis.set_major_locator(MultipleLocator(0.2))
+    ax.xaxis.set_minor_locator(MultipleLocator(0.1))
+    ax.yaxis.set_minor_locator(MultipleLocator(0.1))
+    ax.tick_params(axis="both", which="major", labelsize=8, length=3)
+    ax.tick_params(axis="both", which="minor", length=2)
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    ax.spines["left"].set_linewidth(0.6)
+    ax.spines["bottom"].set_linewidth(0.6)
+    ax.grid(which="major", alpha=0.20, linewidth=0.5)
+    ax.grid(which="minor", alpha=0.08, linewidth=0.4)
+    ax.legend(
+        loc="upper left", fontsize=7.5, frameon=False,
+        handlelength=1.6, borderaxespad=0.4,
+    )
+
+    # ---- inset: coverage-gap residual on a magnified y-axis ----
+    ax_in = ax.inset_axes([0.56, 0.08, 0.40, 0.34])
+    ax_in.axhline(0.0, color="grey", linestyle="--", linewidth=0.7, zorder=1)
+    gap_max = 0.0
+    for m, color in zip(models, colors):
+        cov = (
+            m.coverage_curves[m.coverage_curves["group_type"] == "global"]
+            .sort_values("alpha")
+        )
+        gap = cov["empirical_coverage"].to_numpy() - cov["alpha"].to_numpy()
+        gap_max = max(gap_max, float(np.max(np.abs(gap))))
+        ax_in.plot(cov["alpha"], gap, color=color, linewidth=1.2, zorder=3)
+
+    y_lim = max(0.02, np.ceil(gap_max * 100) / 100)
+    ax_in.set_xlim(0, 1)
+    ax_in.set_ylim(-y_lim, y_lim)
+    ax_in.set_title("empirical $-$ nominal", fontsize=7.5, pad=2)
+    ax_in.xaxis.set_major_locator(MultipleLocator(0.5))
+    ax_in.yaxis.set_major_locator(MultipleLocator(y_lim))
+    ax_in.tick_params(axis="both", labelsize=6.5, length=2, pad=1)
+    for side in ("top", "right"):
+        ax_in.spines[side].set_visible(False)
+    ax_in.spines["left"].set_linewidth(0.5)
+    ax_in.spines["bottom"].set_linewidth(0.5)
+    ax_in.grid(alpha=0.15, linewidth=0.4)
+    ax_in.patch.set_alpha(0.92)
+
+    fig.tight_layout()
     _save(fig, out_dir, "reliability_global_compare")
+
+
+def reliability_global_compare_paper(
+    models: list[ModelOutputs], out_dir: Path
+) -> None:
+    """NeurIPS-ready reliability diagram: clean spines, two-panel view
+    (reliability curve + coverage-gap residual) so the deviation from y=x
+    is unmistakable.
+    """
+    from matplotlib.ticker import MultipleLocator
+
+    fig, (ax_rel, ax_gap) = plt.subplots(
+        1, 2,
+        figsize=(8.6, 3.8),
+        gridspec_kw={"width_ratios": [1.0, 1.0], "wspace": 0.28},
+    )
+    colors = _colors(len(models))
+
+    # ---------- Panel 1: reliability curve ----------
+    ax_rel.plot(
+        [0, 1], [0, 1],
+        color="grey", linestyle="--", linewidth=0.9, label="ideal", zorder=1,
+    )
+    for m, color in zip(models, colors):
+        cov = (
+            m.coverage_curves[m.coverage_curves["group_type"] == "global"]
+            .sort_values("alpha")
+        )
+        g = m.global_metrics[m.global_metrics["group_type"] == "global"]
+        ece = float(g["ece_reg"].iloc[0]) if len(g) else float("nan")
+        ax_rel.plot(
+            cov["alpha"], cov["empirical_coverage"],
+            color=color, linewidth=1.6, zorder=3,
+            label=f"{m.label}  (ECE={ece:.3f})",
+        )
+
+    ax_rel.set_xlim(0, 1)
+    ax_rel.set_ylim(0, 1)
+    ax_rel.set_xlabel(r"nominal coverage $\alpha$", fontsize=10)
+    ax_rel.set_ylabel("empirical coverage", fontsize=10)
+    ax_rel.set_aspect("equal", adjustable="box")
+    ax_rel.xaxis.set_major_locator(MultipleLocator(0.2))
+    ax_rel.yaxis.set_major_locator(MultipleLocator(0.2))
+    ax_rel.xaxis.set_minor_locator(MultipleLocator(0.1))
+    ax_rel.yaxis.set_minor_locator(MultipleLocator(0.1))
+    ax_rel.tick_params(axis="both", which="major", labelsize=8, length=3)
+    ax_rel.tick_params(axis="both", which="minor", length=2)
+    for side in ("top", "right"):
+        ax_rel.spines[side].set_visible(False)
+    ax_rel.spines["left"].set_linewidth(0.6)
+    ax_rel.spines["bottom"].set_linewidth(0.6)
+    ax_rel.grid(which="major", alpha=0.20, linewidth=0.5)
+    ax_rel.grid(which="minor", alpha=0.08, linewidth=0.4)
+    ax_rel.legend(loc="lower right", fontsize=8, frameon=False, handlelength=1.6)
+
+    # ---------- Panel 2: coverage-gap residual ----------
+    ax_gap.axhline(0.0, color="grey", linestyle="--", linewidth=0.9, zorder=1)
+    for m, color in zip(models, colors):
+        cov = (
+            m.coverage_curves[m.coverage_curves["group_type"] == "global"]
+            .sort_values("alpha")
+        )
+        ax_gap.plot(
+            cov["alpha"], cov["empirical_coverage"] - cov["alpha"],
+            color=color, linewidth=1.6, zorder=3, label=m.label,
+        )
+
+    ax_gap.set_xlim(0, 1)
+    ax_gap.set_xlabel(r"nominal coverage $\alpha$", fontsize=10)
+    ax_gap.set_ylabel("empirical $-$ nominal", fontsize=10)
+    ax_gap.xaxis.set_major_locator(MultipleLocator(0.2))
+    ax_gap.xaxis.set_minor_locator(MultipleLocator(0.1))
+    ax_gap.yaxis.set_major_locator(MultipleLocator(0.02))
+    ax_gap.yaxis.set_minor_locator(MultipleLocator(0.01))
+    ax_gap.tick_params(axis="both", which="major", labelsize=8, length=3)
+    ax_gap.tick_params(axis="both", which="minor", length=2)
+    for side in ("top", "right"):
+        ax_gap.spines[side].set_visible(False)
+    ax_gap.spines["left"].set_linewidth(0.6)
+    ax_gap.spines["bottom"].set_linewidth(0.6)
+    ax_gap.grid(which="major", alpha=0.20, linewidth=0.5)
+    ax_gap.grid(which="minor", alpha=0.08, linewidth=0.4)
+
+    fig.tight_layout()
+    _save(fig, out_dir, "reliability_global_compare_paper")
 
 
 def reliability_per_marker_compare(
@@ -116,7 +259,13 @@ def reliability_per_marker_compare(
         # upper-left corner; this never spills into the next column regardless
         # of N or label length.
         for k, (lab, val, color) in enumerate(ece_lines):
-            short = lab if len(lab) <= 10 else f"{lab[:9]}…"
+            # Don't truncate mathtext labels — slicing $...$ mid-expression
+            # produces a parse error.
+            is_mathtext = "$" in lab
+            if is_mathtext or len(lab) <= 10:
+                short = lab
+            else:
+                short = f"{lab[:9]}…"
             ax.text(
                 0.04,
                 0.96 - 0.10 * k,
@@ -294,8 +443,41 @@ def f1_per_marker_compare(
             offset = (i - (len(present) - 1) / 2) * bar_h
             ax.barh(y + offset, df[f"f1_{qtag}__{m.label}"],
                     height=bar_h, color=color, label=m.label)
-        ax.axvline(1.0 - q, color="black", linestyle="--", linewidth=0.8,
-                   label=f"chance ({1.0 - q:.2f})")
+
+        # x-limit: cap a hair above max F1; always start at 0 so the chance
+        # line and the bars share an honest origin.
+        x_max = float(df[cols].max(numeric_only=True).max())
+        x_max = max(x_max * 1.05, 1.0 - q + 0.02)
+        ax.set_xlim(0.0, x_max)
+
+        # Tick layout that always shows the chance value (1-q) explicitly,
+        # plus a clean major grid every 0.1 and minor ticks at 0.05.
+        chance = 1.0 - q
+        from matplotlib.ticker import MultipleLocator
+        ax.xaxis.set_major_locator(MultipleLocator(0.1))
+        ax.xaxis.set_minor_locator(MultipleLocator(0.05))
+        ax.tick_params(axis="x", which="major", length=4, labelsize=8)
+        ax.tick_params(axis="x", which="minor", length=2)
+        # Add an extra labelled tick at the chance value, keeping the
+        # auto-generated ones — guarantees q=0.95 (chance=0.05) and
+        # q=0.99 (chance=0.01) are readable from the axis.
+        existing = list(ax.get_xticks())
+        if not any(abs(t - chance) < 1e-3 for t in existing):
+            ax.set_xticks(sorted(existing + [chance]))
+
+        # Vertical chance line + in-plot annotation (so you don't have to
+        # read it off the axis under tight margins).
+        ax.axvline(chance, color="black", linestyle="--", linewidth=0.8)
+        ax.annotate(
+            f"chance = {chance:.2f}",
+            xy=(chance, n_markers - 0.5),
+            xytext=(4, 0),
+            textcoords="offset points",
+            fontsize=7,
+            va="top",
+            color="black",
+        )
+
         ax.set_yticks(y)
         ax.set_yticklabels(df["marker"].tolist(), fontsize=7)
         ax.set_xlabel(f"F1 (q={q})")
@@ -303,8 +485,16 @@ def f1_per_marker_compare(
         if missing:
             title += f"\n(missing: {', '.join(missing)})"
         ax.set_title(title, fontsize=9)
-        ax.grid(axis="x", alpha=0.3)
-        ax.legend(loc="lower right", fontsize=7)
+
+        # NeurIPS-clean: drop top + right spines, keep a faint x-grid only.
+        for side in ("top", "right"):
+            ax.spines[side].set_visible(False)
+        ax.spines["left"].set_linewidth(0.6)
+        ax.spines["bottom"].set_linewidth(0.6)
+        ax.grid(axis="x", which="major", alpha=0.25, linewidth=0.5)
+        ax.grid(axis="x", which="minor", alpha=0.10, linewidth=0.4)
+
+        ax.legend(loc="lower right", fontsize=7, frameon=False)
     fig.suptitle("Per-marker σ-vs-|residual| F1", fontsize=11)
     fig.tight_layout()
     _save(fig, out_dir, "f1_per_marker_compare")
@@ -315,18 +505,42 @@ def f1_global_vs_q_compare(
 ) -> None:
     if f1_long.empty:
         return
+    from matplotlib.ticker import MultipleLocator
+
     fig, ax = plt.subplots(figsize=(6.0, 4.5))
     colors = _colors(len(models))
     for m, color in zip(models, colors):
         sub = f1_long[f1_long["label"] == m.label].sort_values("quantile")
         ax.plot(sub["quantile"], sub["f1"], color=color, marker="o", label=m.label)
+
+    qs_actual = sorted(f1_long["quantile"].unique().tolist())
     qs = np.linspace(f1_long["quantile"].min(), f1_long["quantile"].max(), 50)
     ax.plot(qs, 1.0 - qs, color="black", linestyle="--", linewidth=0.8, label="chance (1−q)")
-    ax.set_xlabel("quantile q")
-    ax.set_ylabel("F1 (global, σ-vs-|r|)")
-    ax.set_title("Global F1 vs strictness")
-    ax.legend(loc="upper right", fontsize=8)
-    ax.grid(alpha=0.3)
+
+    # Honest origin + tick at every measured q so the gap to the chance line
+    # is unambiguous; rely on the dashed line + legend for the chance value.
+    ax.set_xlim(min(qs_actual) - 0.005, max(qs_actual) + 0.005)
+    ax.set_xticks(qs_actual)
+    ax.set_xticklabels([f"{q:.2f}" for q in qs_actual])
+    ax.set_ylim(bottom=0.0)
+    ax.yaxis.set_major_locator(MultipleLocator(0.1))
+    ax.yaxis.set_minor_locator(MultipleLocator(0.05))
+    ax.tick_params(axis="y", which="major", length=4, labelsize=8)
+    ax.tick_params(axis="y", which="minor", length=2)
+
+    ax.set_xlabel("quantile")
+    ax.set_ylabel("F1 (global, σ vs |r|)")
+    # ax.set_title("Global F1 vs strictness")
+
+    # NeurIPS-clean: drop top + right spines, thin remaining ones, faint grid.
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    ax.spines["left"].set_linewidth(0.6)
+    ax.spines["bottom"].set_linewidth(0.6)
+    ax.grid(axis="y", which="major", alpha=0.25, linewidth=0.5)
+    ax.grid(axis="y", which="minor", alpha=0.10, linewidth=0.4)
+
+    ax.legend(loc="upper right", fontsize=8, frameon=False)
     _save(fig, out_dir, "f1_global_vs_q_compare")
 
 
@@ -370,10 +584,108 @@ def sharpness_vs_ece_compare(
 
     ax.set_xlabel("sharpness (mean σ over pixels)")
     ax.set_ylabel("ECE_reg")
-    ax.set_title("Sharpness vs ECE per marker")
+    # ax.set_title("Sharpness vs ECE per marker")
     ax.legend(loc="upper right", fontsize=8)
     ax.grid(alpha=0.3)
     _save(fig, out_dir, "sharpness_vs_ece_compare")
+
+
+def sharpness_vs_ece_compare_paper(
+    compare_per_marker: pd.DataFrame,
+    models: list[ModelOutputs],
+    out_dir: Path,
+) -> None:
+    """NeurIPS-ready faceted version: one panel per model, every marker
+    annotated. Shared axes so cross-model shifts are eye-ballable.
+    """
+    from matplotlib.ticker import MaxNLocator
+
+    valid_models = [
+        m for m in models
+        if f"sharpness_mean_sigma__{m.label}" in compare_per_marker.columns
+        and f"ece_reg__{m.label}" in compare_per_marker.columns
+    ]
+    if not valid_models:
+        return
+
+    # Compute shared axis limits across all models for honest visual comparison.
+    x_all, y_all = [], []
+    for m in valid_models:
+        x_all.append(compare_per_marker[f"sharpness_mean_sigma__{m.label}"])
+        y_all.append(compare_per_marker[f"ece_reg__{m.label}"])
+    x_concat = pd.concat(x_all).dropna()
+    y_concat = pd.concat(y_all).dropna()
+    if x_concat.empty or y_concat.empty:
+        return
+    pad_x = (x_concat.max() - x_concat.min()) * 0.08 or 0.005
+    pad_y = (y_concat.max() - y_concat.min()) * 0.10 or 0.005
+    xlim = (max(0.0, x_concat.min() - pad_x), x_concat.max() + pad_x)
+    ylim = (max(0.0, y_concat.min() - pad_y), y_concat.max() + pad_y)
+
+    n = len(valid_models)
+    fig, axes = plt.subplots(
+        1, n,
+        figsize=(3.6 * n, 3.6),
+        sharex=True, sharey=True,
+        squeeze=False,
+    )
+    colors = _colors(len(models))
+    color_for = {m.label: c for m, c in zip(models, colors)}
+
+    median_x = float(x_concat.median())
+    median_y = float(y_concat.median())
+
+    for ax, m in zip(axes[0], valid_models):
+        x = compare_per_marker[f"sharpness_mean_sigma__{m.label}"]
+        y = compare_per_marker[f"ece_reg__{m.label}"]
+        markers = compare_per_marker["marker"]
+        valid = x.notna() & y.notna()
+        ax.scatter(
+            x[valid], y[valid],
+            s=22, alpha=0.85, color=color_for[m.label],
+            edgecolors="white", linewidths=0.6,
+            zorder=3,
+        )
+
+        # Annotate every marker. Use small fontsize and a small offset so
+        # labels are readable but not overwhelming.
+        for xi, yi, lab in zip(x[valid], y[valid], markers[valid]):
+            ax.annotate(
+                str(lab),
+                xy=(float(xi), float(yi)),
+                xytext=(3, 2),
+                textcoords="offset points",
+                fontsize=6,
+                color="#222222",
+                zorder=4,
+            )
+
+        # Subtle median guides — separates "high-σ high-ECE" markers from
+        # "low-σ low-ECE" without dominating the panel.
+        ax.axvline(median_x, color="grey", linestyle=":", linewidth=0.6, alpha=0.6)
+        ax.axhline(median_y, color="grey", linestyle=":", linewidth=0.6, alpha=0.6)
+
+        ax.set_title(m.label, fontsize=10, pad=6)
+        ax.set_xlim(*xlim)
+        ax.set_ylim(*ylim)
+        ax.xaxis.set_major_locator(MaxNLocator(nbins=5, prune="both"))
+        ax.yaxis.set_major_locator(MaxNLocator(nbins=6, prune="both"))
+        ax.tick_params(axis="both", labelsize=8, length=3)
+
+        # NeurIPS-clean spines + faint grid.
+        for side in ("top", "right"):
+            ax.spines[side].set_visible(False)
+        ax.spines["left"].set_linewidth(0.6)
+        ax.spines["bottom"].set_linewidth(0.6)
+        ax.grid(alpha=0.18, linewidth=0.4, zorder=0)
+
+    # Single shared axis labels along the bottom-left, no per-panel duplication.
+    axes[0, 0].set_ylabel("ECE", fontsize=10)
+    for ax in axes[0]:
+        ax.set_xlabel(r"sharpness  $\overline{\hat\sigma}$", fontsize=10)
+
+    fig.tight_layout()
+    _save(fig, out_dir, "sharpness_vs_ece_compare_paper")
 
 
 def loo_scatter_compare(
@@ -707,6 +1019,7 @@ def make_all_figures(
     reference_idx: int = 0,
 ) -> None:
     reliability_global_compare(models, out_dir)
+    reliability_global_compare_paper(models, out_dir)
     reliability_per_marker_compare(models, markers, out_dir)
     coverage_gap_compare(models, out_dir)
     ece_per_marker_compare(compare_per_marker, models, out_dir)
@@ -715,6 +1028,7 @@ def make_all_figures(
     f1_per_marker_compare(compare_per_marker, models, out_dir)
     f1_global_vs_q_compare(f1_long, models, out_dir)
     sharpness_vs_ece_compare(compare_per_marker, models, out_dir, reference_idx)
+    sharpness_vs_ece_compare_paper(compare_per_marker, models, out_dir)
     loo_scatter_compare(paper_long, models, out_dir)
     reliability_top_degraders(compare_per_marker, models, out_dir, reference_idx)
     reliability_top_improvers(compare_per_marker, models, out_dir, reference_idx)
