@@ -1,13 +1,39 @@
-base_path: /path/to/project/gold_standard
+# Gold-standard (nsclc2-panel1) cell-typing config for the equivariant eval.
+#
+# STATUS: ready EXCEPT the four `raw:` paths below. The labelled raw data
+# (instance masks + cell-type .rds + markers CSV) is NOT on the cluster yet
+# (only preprocessed tissue images exist). Fill the <<<TODO>>> paths when the
+# data lands, then run, in order:
+#   1) python -m gold_standard.data                      # build processed dir
+#   2) python -m core.embeddings.inference_equivariant \
+#        --config ./gold_standard/gs_config.yaml --model equiv_convnext_v2 \
+#        --scheme patch --batch_size 32
+#   3) python -m core.crossval \
+#        --config ./gold_standard/gs_config.yaml --run equiv_convnext_v2_patch
+
+base_path: /net/tscratch/people/plgslukasik/immu-vis/celltyping-runs/gold_standard
 dataset_name: nsclc2-panel1
 
 raw:
-  img_dir: /path/to/data/nsclc2_cells/imgs/
-  mask_dir: /path/to/data/nsclc2_cells/masks/
-  rds_path: /path/to/data/sce_labelled_V1.rds
-  channels_csv_path: /path/to/metadata/nsclc2-panel1/markers.csv
+  # <<<TODO>>> raw IMC multi-channel tiffs, one per tissue: {tissue_id}.tiff
+  img_dir: /net/tscratch/people/plgslukasik/CHANGEME/nsclc2-panel1/imgs/
+  # <<<TODO>>> instance segmentation masks, one per tissue: {tissue_id}.tiff
+  mask_dir: /net/tscratch/people/plgslukasik/CHANGEME/nsclc2-panel1/masks/
+  # <<<TODO>>> labelled single-cell experiment (.rds) -> cell-type labels.
+  #   Must yield obs with: image, Pos_X, Pos_Y, celltypes
+  rds_path: /net/tscratch/people/plgslukasik/CHANGEME/sce_labelled.rds
+  # <<<TODO>>> markers CSV with columns: "Marker Name", "protein_id"
+  #   (channel order must match the tiff channel order)
+  channels_csv_path: /net/tscratch/people/plgslukasik/CHANGEME/nsclc2-panel1_markers.csv
 
-processed_dir: /path/to/project/gold_standard/dataset
+# Processed dir produced by `python -m gold_standard.data`
+processed_dir: /net/tscratch/people/plgslukasik/immu-vis/celltyping-runs/gold_standard/dataset
 
-virtues_embeddings_dir: /path/to/project/gold_standard/dataset/marker_embeddings
+processed:
+  patch_size: 32   # core/data.py default; equivariant hook can upsample (input_size)
+  modality: imc
+
+# VirTues bits are intentionally unused by the equivariant path; kept so the
+# upstream core.crossval config loader stays happy.
+virtues_embeddings_dir: /net/tscratch/people/plgslukasik/immu-vis/celltyping-runs/gold_standard/dataset/marker_embeddings
 virtues_config_path: ./core/models/virtues_config.yaml

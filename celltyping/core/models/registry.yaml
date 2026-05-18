@@ -69,3 +69,15 @@ models:
     ckpt_path: /path/to/models/eva_ours.ckpt
     embeddings_path: /path/to/embeddings/GenePT_embedding.pkl
     panel_conf_path: /path/to/configs/all_panels_config.yaml
+
+  # Equivariant ConvNeXt autoencoder (this training repo). Use with the
+  # VirTues-free runner: python -m core.embeddings.inference_equivariant
+  equiv_convnext_v2:
+    setup_func: core.models.immuvis_equivariant.setup_immuvis_equivariant
+    repo_path: /net/tscratch/people/plgslukasik/immu-vis/multiplex-image-model
+    checkpoint_path: /net/tscratch/people/plgslukasik/immu-vis/multiplex-image-model/checkpoints/checkpoint-EquivariantConvnext_v2modelv2_20260514_214628_J2598224-epoch_79.pth
+    conf: /net/tscratch/people/plgslukasik/immu-vis/multiplex-image-model/train_masked_equivariant_config_flip_v2_wider_modelv2.yaml
+    panel_conf_path: /net/tscratch/people/plgslukasik/immu-vis/multiplex-image-model/configs/all_panels_config.yaml
+    tokenizer_path: /net/tscratch/people/plgslukasik/immu-vis/multiplex-image-model/configs/all_markers_tokenizer.yaml
+    # input_size: 64        # optional: bilinear-resize 32x32 crops before encoding
+    # skip_preprocessing: false
