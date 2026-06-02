@@ -53,8 +53,11 @@ def load_model_and_data(config_path, checkpoint_path=None, device='cpu'):
     print(f"Markers set: {MARKERS_SET}")
     print(f"Number of markers: {len(MARKERS_SET)}")
 
-    # Build tokenizer
-    TOKENIZER = {k: v for k, v in zip(sorted(MARKERS_SET), range(len(MARKERS_SET)))}
+    # Use the tokenizer from the config file (must match training!)
+    # NOTE: Python's sorted() uses case-sensitive ASCII order, which differs from
+    # the case-insensitive order used when the tokenizer was originally built.
+    # Rebuilding from sorted(MARKERS_SET) scrambles 261/265 marker IDs.
+    TOKENIZER = TOKENIZER_CONFIG
     INV_TOKENIZER = {v: k for k, v in TOKENIZER.items()}
 
     # Data transforms - aligned with training script
@@ -123,11 +126,22 @@ def load_model_and_data(config_path, checkpoint_path=None, device='cpu'):
     }
 
     # Create model based on type
-    if config["model_type"] == "EquivariantConvnext":
+    if config["model_type"] == "FullyEquivariantConvnext":
+        from train_masked_model_ddp_ed import FullyEquivariantMultiplexAutoencoder
+        model = FullyEquivariantMultiplexAutoencoder(**model_config).to(device)
+    elif config["model_type"] == "EquivariantConvnext":
         from multiplex_model.equivariant_modules import EquivariantMultiplexAutoencoder
+        model = EquivariantMultiplexAutoencoder(**model_config).to(device)
+    elif config["model_type"] == "EquivariantConvnextV2":
+        from multiplex_model.equivariant_modules_v2 import EquivariantMultiplexAutoencoder
         model = EquivariantMultiplexAutoencoder(**model_config).to(device)
     elif config["model_type"] == "Convnext":
         model = MultiplexAutoencoder(**model_config).to(device)
+    elif config["model_type"] == "ConvnextImmuVisLegacy":
+        # Original dav3794/multiplex-image-model master ImmuVis architecture
+        # (encoder norm + latent_norm, Identity pm-stem, scaling 2^(ma+pm-1)).
+        from multiplex_model.modules_immuvis_legacy import MultiplexAutoencoderLegacy
+        model = MultiplexAutoencoderLegacy(**model_config).to(device)
     else:
         raise ValueError(f"Unknown model type: {config['model_type']}")
 

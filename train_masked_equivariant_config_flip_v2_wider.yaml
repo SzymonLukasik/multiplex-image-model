@@ -1,0 +1,121 @@
+encoder:
+    # marker-agnostic branch
+    ma_layers_blocks: [1]
+    ma_embedding_dims: [16]
+    # pan-marker equivariant branch
+    # pm_layers_blocks: [2, 2]
+    pm_layers_blocks: [4, 4, 4]
+    # pm_layers_blocks: [4, 4]
+    # pm_embedding_dims: [64, 128]
+    # pm_embedding_dims: [128, 256]
+    pm_embedding_dims: [192, 384, 768]
+    # pm_embedding_dims: [128, 256, 512]
+    maximum_frequency: 1
+    include_stem: true
+    latent_nonlinearity: "none"
+
+    use_gating: true
+    use_layerscale: True #True, czemu mialem False przed chwila??
+    layerscale_init: 1.0e-6
+    gate_bias_init: 1.0
+    pool_use_act: true
+    # NOTE: must match the checkpoint's training-time architecture. The
+    # `from_checkpoint` model (epoch_34) was trained without EquivariantPixelLN,
+    # so use_norm must be false here — otherwise load_state_dict reports all
+    # pool_norms.* / blocks.*.norm.* as missing keys.
+    use_norm: false
+    # use_grn: false
+
+    hyperkernel_config:
+      embedding_dim: 384
+      kernel_size: 1
+      padding: 0
+      stride: 1
+      use_bias: true
+
+decoder:
+  decoded_embed_dim: 512
+  num_blocks: 1
+
+  hyperkernel_config:
+      # embedding_dim == decoded_embed_dim
+      kernel_size: 1
+      padding: 0
+      stride: 1
+      use_bias: true
+
+# Data configuration
+panel_config: configs/all_panels_config.yaml
+tokenizer_config: configs/all_markers_tokenizer.yaml
+input_image_size: [113, 113]
+num_workers: 2
+batch_size: 4
+
+# Training configuration
+device: cuda
+lr: 5e-4
+final_lr: 1e-4
+weight_decay: 0.0001
+gradient_accumulation_steps: 1
+epochs: 200 #250
+frac_warmup_steps: 0.1
+early_val_epochs: 3
+early_val_checks_per_epoch: 5
+min_channels_frac: 0.75
+spatial_masking_ratio: 0.6
+fully_masked_channels_max_frac: 0.5
+mask_patch_size: 8
+from_checkpoint: /net/tscratch/people/plgslukasik/immu-vis/multiplex-image-model/checkpoints/checkpoint-EquivariantConvnext_v2_20260403_200855_J2506644-epoch_199.pth
+#/net/tscratch/people/plgslukasik/immu-vis/multiplex-image-model/checkpoints/checkpoint-EquivariantConvnext_v2_20260406_003050_J2509085-epoch_34.pth
+#/net/tscratch/people/plgslukasik/immu-vis/multiplex-image-model/checkpoints/checkpoint-EquivariantConvnext_v2_20260411_205651_J2517570-epoch_79.pth - wider
+#/net/tscratch/people/plgslukasik/immu-vis/multiplex-image-model/checkpoints/checkpoint-EquivariantConvnext_v2_20260407_202719_J2511484-epoch_49.pth
+# /net/tscratch/people/plgslukasik/immu-vis/multiplex-image-model/checkpoints/checkpoint-EquivariantConvnext_v2_20260406_003050_J2509085-epoch_34.pth
+#/net/tscratch/people/plgslukasik/immu-vis/multiplex-image-model/checkpoints/checkpoint-EquivariantConvnext_v2_20260405_155148_J2508441-epoch_24.pth
+# /net/tscratch/people/plgslukasik/immu-vis/multiplex-image-model/checkpoints/checkpoint-EquivariantConvnext_v2_20260328_204327_J2494169-epoch_154.pth # smaller
+# /net/tscratch/people/plgslukasik/immu-vis/multiplex-image-model/checkpoints/checkpoint-EquivariantConvnext_v2_20260403_101452_J2506143-epoch_199.pth
+# /net/tscratch/people/plgslukasik/immu-vis/multiplex-image-model/checkpoints/checkpoint-EquivariantConvnext_v2_20260331_193828_J2499822-epoch_169.pth
+#/net/tscratch/people/plgslukasik/immu-vis/multiplex-image-model/checkpoints/checkpoint-EquivariantConvnext_v2_20260331_193828_J2499822-epoch_174.pth
+
+# /net/tscratch/people/plgslukasik/immu-vis/multiplex-image-model/checkpoints/checkpoint-EquivariantConvnext_v2_20260331_193828_J2499822-epoch_154.pth
+#/net/tscratch/people/plgslukasik/immu-vis/multiplex-image-model/checkpoints/checkpoint-EquivariantConvnext_v2_20260329_190556_J2498148-epoch_144.pth
+# /net/tscratch/people/plgslukasik/immu-vis/multiplex-image-model/checkpoints/checkpoint-EquivariantConvnext_v2_20260328_204327_J2494169-epoch_149.pth - for a smaller one
+#/net/tscratch/people/plgslukasik/immu-vis/multiplex-image-model/checkpoints/checkpoint-EquivariantConvnext_v2_20260327_133540_J2491829-epoch_114.pth
+#/net/tscratch/people/plgslukasik/immu-vis/multiplex-image-model/checkpoints/checkpoint-EquivariantConvnext_v2_20260325_005036_J2487506-epoch_114.pth
+#/net/tscratch/people/plgslukasik/immu-vis/multiplex-image-model/checkpoints/checkpoint-EquivariantConvnext_v2_20260324_202324_J2487078-epoch_84.pth
+# /net/tscratch/people/plgslukasik/immu-vis/multiplex-image-model/checkpoints/checkpoint-EquivariantConvnext_v2_20260324_202324_J2487078-epoch_69.pth
+# /net/tscratch/people/plgslukasik/immu-vis/multiplex-image-model/checkpoints/checkpoint-EquivariantConvnext_v2_20260322_220721_J2484141-epoch_74.pth 
+# /net/tscratch/people/plgslukasik/immu-vis/multiplex-image-model/checkpoints/checkpoint-EquivariantConvnext_v2_20260322_164648_J2482783-epoch_54.pth - large one
+#/net/tscratch/people/plgslukasik/immu-vis/multiplex-image-model/checkpoints/checkpoint-EquivariantConvnext_v2_20260320_001116_J2479463-epoch_34.pth
+#/net/tscratch/people/plgslukasik/immu-vis/multiplex-image-model/checkpoints/checkpoint-EquivariantConvnext_v2_20260320_162448_J2480097-epoch_24.pth
+# /net/tscratch/people/plgslukasik/immu-vis/multiplex-image-model/checkpoints/checkpoint-EquivariantConvnext_v2_20260311_004659_J5161-epoch_49.pth
+# /net/tscratch/people/plgslukasik/immu-vis/multiplex-image-model/checkpoints/checkpoint-EquivariantConvnext_v2_20260307_111903_J2459493-epoch_4.pth
+  # /raid_encrypted/immucan/models/checkpoint-EquivariantConvnext_v2_20260226_110206_J2449660-epoch_14.pth
+#/p/project1/hai_1191/lukasik1/immu-vis/multiplex-image-model/checkpoints/checkpoint-EquivariantConvnext_v2_20260221_132758_J14507924-epoch_64.pth # checkpoint-EquivariantConvnext_v2_20260217_025156_J14493198-epoch_59.pth
+# checkpoint-EquivariantConvnext_v2_20260210_131536_J14473216-epoch_54.pth #checkpoint-EquivariantConvnext_v2_20260209_061034_J14469250-epoch_39.pth #checkpoint-EquivariantConvnext_v2_20260207_235217_J14465387-epoch_34.pth #checkpoint-EquivariantConvnext_v2_20260206_232651_J14461159-epoch_29.pth
+#checkpoint-EquivariantConvnext_v2_20260205_195048_J14455696-epoch_24.pth
+
+#checkpoint-EquivariantConvnext_v2_20260204_221835_J14449948-epoch_19.pth #checkpoint-EquivariantConvnext_v2_20260203_233428_J14442510-epoch_14.pth #checkpoint-EquivariantConvnext_v2_20260202_225116_J14431113-epoch_9.pth #checkpoint-EquivariantConvnext_v2_20260202_010926_J14421879-epoch_4.pth # /p/project1/hai_1191/lukasik1/immu-vis/multiplex-image-model/checkpoints/checkpoint-EquivariantConvnext_v2_20260129_212556_J14406642-epoch_54.pth #/p/project1/hai_1191/lukasik1/immu-vis/multiplex-image-model/checkpoints/checkpoint-EquivariantConvnext_v2_20260128_193109_J14401084-epoch_39.pth # /p/project1/hai_1191/lukasik1/immu-vis/multiplex-image-model/checkpoints/checkpoint-EquivariantConvnext_v2_20260127_112735_J14397396-epoch_24.pth # /p/project1/hai_1191/lukasik1/immu-vis/multiplex-image-model/checkpoints/checkpoint-EquivariantConvnext_v2_20260113_022759_J14355603-epoch_9.pth
+checkpoints_dir: checkpoints
+save_checkpoint_freq: 5
+
+resume_optimizer: True
+resume_scheduler: True
+
+
+# Neptune logging configuration
+# 'iidbatchnorm-really'
+# no-norm
+# field-norm-everywhere
+# 'equivariant-pixel-ln'
+# iidbatchnorm-norm-no-stats-everywhere
+#  'FieldNorm everywhere'
+#   
+# 'iidbatchnorm-norm-no-stats-no-poolings' clamp-15
+tags: ['equiv-pixel-ln', 'clamp-5', beta_0.5', 'new-113-shape', 'new-config', restarted, higher lr', 'grouped-conv-convnext','gating', 'with-acts', 'layerscale', 'no-norm', 'small-size', 'bank-field-type', 'conv->fieldnorm-really', 'with-after-pool-acts', 'flip-equivariance', 'hyperkernel', 'patch-masking', 'panel-1 data', 'Gaussian NLL', 'Steerable', 'escnn', 'cropped-patches']
+run_prefix: 'EquivariantConvnext_v2'
+model_type: "EquivariantConvnext"
+
+logger: tensorboard
+tensorboard_log_dir: runs
+
+# changed batch size to 2, restarted lr scheduler for the smaller

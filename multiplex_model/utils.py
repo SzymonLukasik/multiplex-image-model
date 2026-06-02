@@ -121,10 +121,10 @@ def plot_reconstructs_with_uncertainty(
 
         if j < num_channels:
             marker_name = markers_names_map[channel_ids[0, j].item()]
-            ax_img.imshow(orig_img[0, j].cpu().numpy(), cmap='CMRmap', vmin=0, vmax=1)
+            ax_img.imshow(orig_img[0, j].cpu().float().numpy(), cmap='CMRmap', vmin=0, vmax=1)
             ax_img.set_title(f'Original\n{marker_name}')
 
-            ax_reconstructed.imshow(reconstructed_img[0, j].cpu().numpy(), cmap='CMRmap', vmin=0, vmax=1)
+            ax_reconstructed.imshow(reconstructed_img[0, j].cpu().float().numpy(), cmap='CMRmap', vmin=0, vmax=1)
             is_masked = channel_ids[0, j].item() in masked_ids
             is_partially_masked = channel_ids[0, j].item() in partially_masked_ids
             if is_partially_masked:
@@ -142,7 +142,7 @@ def plot_reconstructs_with_uncertainty(
                 var_min = None
                 var_max = None
 
-            ax_uncertainty.imshow(sigma_plot[0, j].cpu().numpy(), cmap='CMRmap', vmin=var_min, vmax=var_max)
+            ax_uncertainty.imshow(sigma_plot[0, j].cpu().float().numpy(), cmap='CMRmap', vmin=var_min, vmax=var_max)
             ax_uncertainty.set_title(f'Variance\n{marker_name}')
             
     fig_orig.tight_layout()
@@ -197,7 +197,7 @@ def plot_reconstructs_with_masks(
             marker_name = markers_names_map[channel_id]
             
             # Show original
-            ax_orig.imshow(orig_img[0, j].cpu().numpy(), cmap='CMRmap', vmin=0, vmax=1)
+            ax_orig.imshow(orig_img[0, j].cpu().float().numpy(), cmap='CMRmap', vmin=0, vmax=1)
             ax_orig.set_title(f'Original\n{marker_name}')
             ax_orig.set_xticks([])
             ax_orig.set_yticks([])
@@ -228,9 +228,9 @@ def plot_reconstructs_with_masks(
                 
                 # Convert grayscale to RGBA using colormap (image already normalized to 0-1)
                 cmap = plt.cm.CMRmap
-                img_data = orig_img[0, j].cpu().numpy()
+                img_data = orig_img[0, j].cpu().float().numpy()
                 rgba_img = cmap(img_data)  # Apply colormap directly
-                
+
                 # Set masked pixels to pure white with 100% opacity
                 mask_np = pixel_masks[0, masked_idx].cpu().numpy()
                 rgba_img[mask_np] = [1.0, 1.0, 1.0, 1.0]  # Pure white, fully opaque
@@ -246,7 +246,7 @@ def plot_reconstructs_with_masks(
                     spine.set_visible(True)
             
             # Show reconstruction
-            ax_reconstructed.imshow(reconstructed_img[0, j].cpu().numpy(), cmap='CMRmap', vmin=0, vmax=1)
+            ax_reconstructed.imshow(reconstructed_img[0, j].cpu().float().numpy(), cmap='CMRmap', vmin=0, vmax=1)
             ax_reconstructed.set_title(f'Reconstructed\n{marker_name}')
             ax_reconstructed.set_xticks([])
             ax_reconstructed.set_yticks([])
