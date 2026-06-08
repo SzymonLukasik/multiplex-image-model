@@ -15,7 +15,7 @@ torch.Tensor.__setitem__ = _safe_setitem
 
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, Type, Callable, Literal
+from typing import Dict, Type, Callable, Literal, Optional
 from typing_extensions import Literal
 from torch import einsum
 from torch.nn import functional as F
@@ -399,8 +399,25 @@ class EquivariantHyperkernel(nn.Module):
         bl_repr,
         use_bias: bool = True,
         intertwiner_basis: str = "scalar",
+        module_type: str = "encoder",
     ):
+        """
+        module_type:
+          'encoder'  (default) — input is (B, C·input_fields·R, H, W) where
+              C is the number of markers in the batch sample. Aggregates over
+              markers: each output field is a marker-conditioned linear
+              combination of every input field of every marker. Output:
+              (B, output_fields·R, H, W) GeometricTensor.
+          'decoder' — input is (B, input_fields·R, H, W) (the BL-regular latent
+              from the encoder). Broadcasts to each requested marker, producing
+              (B, C, output_fields·R, H, W) GeometricTensor. Used to expand the
+              encoder latent into per-marker BL-regular features before the
+              equivariant decoder stages.
+        """
         super().__init__()
+        if module_type not in ("encoder", "decoder"):
+            raise ValueError(f"module_type must be 'encoder' or 'decoder', got {module_type!r}")
+        self.module_type = module_type
         self.num_channels = num_channels
         self.input_fields = input_fields
         self.output_fields = output_fields
@@ -458,7 +475,15 @@ class EquivariantHyperkernel(nn.Module):
         else:
             self.register_parameter("bias", None)
 
-    def forward(self, x: torch.Tensor, indices: torch.Tensor) -> e2nn.GeometricTensor:
+    def forward(self, x: torch.Tensor, indices: torch.Tensor):
+        if self.module_type == "encoder":
+            return self._forward_encoder(x, indices)
+        return self._forward_decoder(x, indices)
+
+    # ------------------------------------------------------------------
+    # encoder mode: aggregate over C markers
+    # ------------------------------------------------------------------
+    def _forward_encoder(self, x: torch.Tensor, indices: torch.Tensor) -> e2nn.GeometricTensor:
         B, total_c, H, W = x.shape
         C = indices.shape[1]
         K_in = self.input_fields
@@ -467,7 +492,7 @@ class EquivariantHyperkernel(nn.Module):
         P = self.params_per_pair
 
         assert total_c == C * K_in * R, (
-            f"EquivariantHyperkernel expected {C * K_in * R} channels "
+            f"EquivariantHyperkernel(encoder) expected {C * K_in * R} channels "
             f"(C={C}, K_in={K_in}, R={R}), got {total_c}"
         )
 
@@ -479,39 +504,110 @@ class EquivariantHyperkernel(nn.Module):
         w = w.view(B, C, K_in, K_out, P)
         w = w.permute(0, 3, 1, 2, 4).reshape(B, K_out, F, P)  # (B, E, F, P)
 
-        if self.intertwiner_basis == "scalar":
-            # Single scalar per pair acts uniformly across all R components.
-            out = torch.einsum("bfrhw,bef->berhw", x_f, w[..., 0])
-        else:
-            # Full intertwiner: per-irrep-group multiplicity mixing, identity on
-            # irrep_dim. For each group, weights form an (mult_out × mult_in)
-            # real matrix per (input_field, output_field) pair.
-            out = x.new_empty(B, K_out, R, H, W)
-            param_offset = 0
-            for (offset, mult, irrep_dim) in self._irrep_groups:
-                length = mult * irrep_dim
-                x_grp = x_f[:, :, offset:offset + length].view(
-                    B, F, mult, irrep_dim, H, W
-                )
-                w_grp = w[:, :, :, param_offset:param_offset + mult * mult]
-                w_grp = w_grp.view(B, K_out, F, mult, mult)  # (B, E, F, mult_out, mult_in)
-                # out_grp[b,e,n,d,h,w] = Σ_{f,m} w_grp[b,e,f,n,m] * x_grp[b,f,m,d,h,w]
-                out_grp = torch.einsum("befnm,bfmdhw->bendhw", w_grp, x_grp)
-                out[:, :, offset:offset + length] = out_grp.reshape(
-                    B, K_out, length, H, W
-                )
-                param_offset += mult * mult
+        out = self._apply_intertwiner_aggregate(x_f, w, B, K_out, R, H, W)
 
         if self.use_bias:
-            # Additive tensor that touches only the trivial (freq-0, flip-0)
-            # component, which is the first channel of each BL-regular field
-            # (the only invariant subspace under both rotation and reflection).
             add = out.new_zeros(1, K_out, R, 1, 1)
             add[0, :, 0, 0, 0] = self.bias.to(out.dtype)
             out = out + add
 
         out = out.reshape(B, K_out * R, H, W)
         return e2nn.GeometricTensor(out, self.out_type)
+
+    # ------------------------------------------------------------------
+    # decoder mode: broadcast to C markers, per-marker output
+    # ------------------------------------------------------------------
+    def _forward_decoder(self, x: torch.Tensor, indices: torch.Tensor) -> e2nn.GeometricTensor:
+        """
+        x:        (B, K_in*R, H, W) — BL-regular latent from the encoder
+        indices:  (B, C)            — marker tokens to reconstruct
+        returns:  GeometricTensor over the *expanded* field type
+                  [bl_repr] * (output_fields * C-effective), tensor shape
+                  (B, C, K_out*R, H, W) — but flattened along C·K_out so it
+                  can be reshaped by the caller and wrapped per-marker.
+
+        Practically we return the raw tensor as (B, C, K_out*R, H, W) (no
+        GeometricTensor) because each sample carries C different marker
+        outputs and the caller usually reshapes (B*C, K_out*R, H, W) before
+        wrapping as a GeometricTensor of type `[bl_repr]*K_out` for the
+        equivariant decoder stages.
+        """
+        B, total_c, H, W = x.shape
+        C = indices.shape[1]
+        K_in = self.input_fields
+        K_out = self.output_fields
+        R = self.repr_dim
+        P = self.params_per_pair
+
+        assert total_c == K_in * R, (
+            f"EquivariantHyperkernel(decoder) expected {K_in * R} channels "
+            f"(K_in={K_in}, R={R}), got {total_c}"
+        )
+
+        x_f = x.view(B, K_in, R, H, W)                      # (B, K_in, R, H, W)
+        # Weights: (B, C, K_in, K_out, P)
+        w = self.weights(indices).to(x.dtype)
+        w = w.view(B, C, K_in, K_out, P)
+
+        out = self._apply_intertwiner_broadcast(x_f, w, B, C, K_out, R, H, W)
+
+        if self.use_bias:
+            add = out.new_zeros(1, 1, K_out, R, 1, 1)
+            add[0, 0, :, 0, 0, 0] = self.bias.to(out.dtype)
+            out = out + add
+
+        # (B, C, K_out, R, H, W) → (B, C, K_out*R, H, W)
+        return out.reshape(B, C, K_out * R, H, W)
+
+    # ------------------------------------------------------------------
+    # shared intertwiner kernels (scalar / full)
+    # ------------------------------------------------------------------
+    def _apply_intertwiner_aggregate(self, x_f, w, B, K_out, R, H, W):
+        """encoder-mode contraction: sum over F = C*K_in input fields → (B, K_out, R, H, W)."""
+        if self.intertwiner_basis == "scalar":
+            return torch.einsum("bfrhw,bef->berhw", x_f, w[..., 0])
+        F = x_f.shape[1]
+        out = x_f.new_empty(B, K_out, R, H, W)
+        param_offset = 0
+        for (offset, mult, irrep_dim) in self._irrep_groups:
+            length = mult * irrep_dim
+            x_grp = x_f[:, :, offset:offset + length].view(B, F, mult, irrep_dim, H, W)
+            w_grp = w[:, :, :, param_offset:param_offset + mult * mult].view(
+                B, K_out, F, mult, mult,
+            )
+            out_grp = torch.einsum("befnm,bfmdhw->bendhw", w_grp, x_grp)
+            out[:, :, offset:offset + length] = out_grp.reshape(B, K_out, length, H, W)
+            param_offset += mult * mult
+        return out
+
+    def _apply_intertwiner_broadcast(self, x_f, w, B, C, K_out, R, H, W):
+        """decoder-mode contraction: broadcast over C markers, sum only over K_in.
+
+        x_f shape: (B, K_in, R, H, W)
+        w   shape: (B, C, K_in, K_out, P)
+        returns:   (B, C, K_out, R, H, W)
+        """
+        if self.intertwiner_basis == "scalar":
+            # out[b,c,e,r,h,w] = Σ_{k_in} w[b,c,k_in,e,0] * x_f[b,k_in,r,h,w]
+            return torch.einsum("bkrhw,bcke->bcerhw", x_f, w[..., 0])
+
+        out = x_f.new_empty(B, C, K_out, R, H, W)
+        param_offset = 0
+        for (offset, mult, irrep_dim) in self._irrep_groups:
+            length = mult * irrep_dim
+            x_grp = x_f[:, :, offset:offset + length].view(
+                B, self.input_fields, mult, irrep_dim, H, W,
+            )
+            w_grp = w[:, :, :, :, param_offset:param_offset + mult * mult].view(
+                B, C, self.input_fields, K_out, mult, mult,
+            )
+            # out_grp[b,c,e,n,d,h,w] = Σ_{k_in, m_in} w_grp[b,c,k_in,e,n,m_in] * x_grp[b,k_in,m_in,d,h,w]
+            out_grp = torch.einsum("bckenm,bkmdhw->bcendhw", w_grp, x_grp)
+            out[:, :, :, offset:offset + length] = out_grp.reshape(
+                B, C, K_out, length, H, W,
+            )
+            param_offset += mult * mult
+        return out
 
 
 class EquivariantMultiplexImageEncoder(nn.Module):
@@ -546,7 +642,10 @@ class EquivariantMultiplexImageEncoder(nn.Module):
             gate_bias_init: float = 1.0,
             pool_use_act: bool = True,
             antialiased_downsample: bool = True,
+            antialiased_stem: Optional[bool] = None,
             output_scalars: int = None,
+            output_irreps=None,
+            output_trivial: bool = True,
     ):
         """Initialize the Multiplex Image Encoder.
 
@@ -586,6 +685,7 @@ class EquivariantMultiplexImageEncoder(nn.Module):
             gate_bias_init=gate_bias_init,
             pool_use_act=pool_use_act,
             antialiased_downsample=antialiased_downsample,
+            antialiased_stem=antialiased_stem,
             output_trivial=False,           # keep BL-regular through MA→PM
             gspace=self._gspace,
         )
@@ -630,8 +730,18 @@ class EquivariantMultiplexImageEncoder(nn.Module):
             gate_bias_init=gate_bias_init,
             pool_use_act=pool_use_act,
             antialiased_downsample=antialiased_downsample,
-            output_trivial=True,            # final latent as plain tensor
-            output_scalars=output_scalars,  # explicit scalar count for Regular2Trivial
+            # output_trivial: True  → final latent as plain tensor of trivial
+            #                         scalars (the original/default modelv2 path).
+            # output_trivial: False → return a BL-regular GeometricTensor instead
+            #                         (used by FullyEquivariantMultiplexAutoencoderV2
+            #                         so the BL-regular latent flows straight into
+            #                         the equivariant decoder — no Regular2Trivial /
+            #                         trivial2regular round-trip at the bottleneck).
+            output_trivial=output_trivial,
+            output_scalars=output_scalars,  # only consulted if output_trivial=True
+            # Mixed-irrep latent (Option B). When set, overrides output_scalars
+            # and emits ``[trivial, sign, psi_k, ...]`` instead of trivial-only.
+            output_irreps=output_irreps,
             input_field_type=self.hyperkernel.out_type,
             gspace=self._gspace,
         )
@@ -697,7 +807,25 @@ class EquivariantMultiplexAutoencoder(nn.Module):
             decoder_config (Dict): Configuration for the decoder.
         """
         super().__init__()
-        self.latent_dim = encoder_config['pm_embedding_dims'][-1]
+        # Determine the latent channel count the decoder must consume.
+        # Precedence:
+        #   1. ``output_irreps``  → mixed-irrep latent, total = Σ mult·irrep_dim
+        #                          (Option B from the encoder design discussion;
+        #                          uses trivial + sign [+ psi_k] per input field
+        #                          instead of just the trivial sub-component).
+        #   2. ``output_scalars`` → trivial-only Regular2Trivial; this is the
+        #                          actual latent channel count.
+        #   3. fallback           → ``pm_embedding_dims[-1]`` (= number of
+        #                          regular fields at the last PM stage; matches
+        #                          Regular2Trivial's default with rank-equal
+        #                          trivial output).
+        output_irreps = encoder_config.get('output_irreps')
+        if output_irreps is not None:
+            self.latent_dim = mixed_irreps_total_channels(output_irreps)
+        else:
+            self.latent_dim = encoder_config.get(
+                'output_scalars', None
+            ) or encoder_config['pm_embedding_dims'][-1]
         # self.decoder_dim = decoder_config['decoded_embed_dim']
         self.num_channels = num_channels
   
@@ -850,11 +978,123 @@ class Regular2Trivial(nn.Module):
 
         # kernel_size = 1 → no spatial mixing, only channel mixing
         self.proj = e2nn.R2Conv(in_type, out_type,
-                                kernel_size=1, bias=True, 
+                                kernel_size=1, bias=True,
                                 initialize=True # TODO initialize=True
                                 )
 
         self.in_type, self.out_type = in_type, out_type
+
+    def forward(self, x: e2nn.GeometricTensor):
+        return self.proj(x)
+
+
+# ---------------------------------------------------------------------------
+# Mixed-irrep projection for Option B from the encoder design discussion.
+# Generalises Regular2Trivial: instead of projecting to only the trivial
+# sub-component of each input field (which throws away repr_dim - 1 channels
+# per field by Schur's lemma), this projects to a configurable mix of irreps
+# — trivial, sign, and any psi_k up to the encoder's max_freq. The latent uses
+# more of the regular-field information while staying equivariant; the
+# downstream non-equivariant decoder consumes the result as plain channels.
+# ---------------------------------------------------------------------------
+_IRREP_DIM_BY_NAME = {'trivial': 1, 'sign': 1}
+
+
+def _irrep_dim(name: str) -> int:
+    if name in _IRREP_DIM_BY_NAME:
+        return _IRREP_DIM_BY_NAME[name]
+    if name.startswith('psi_'):
+        return 2
+    raise ValueError(f"Unknown irrep name: {name!r}")
+
+
+def _irrep_name_to_id(name: str):
+    """Map friendly irrep names to escnn O(2) irrep ids ``(j, k)``."""
+    if name == 'trivial':
+        return (0, 0)
+    if name == 'sign':
+        return (1, 0)
+    if name.startswith('psi_'):
+        k = int(name.split('_', 1)[1])
+        if k < 1:
+            raise ValueError(f"psi_{k} requires k >= 1")
+        return (1, k)
+    raise ValueError(f"Unknown irrep name: {name!r}")
+
+
+def _normalise_irrep_mix(irrep_mix):
+    """Accept a list of ``[name, mult]`` pairs (or tuples), drop mult<=0."""
+    norm = []
+    for entry in irrep_mix:
+        if isinstance(entry, dict):
+            # also accept {'name': 'trivial', 'mult': 384}
+            name, mult = entry['name'], entry['mult']
+        else:
+            name, mult = entry[0], int(entry[1])
+        if mult > 0:
+            norm.append((name, int(mult)))
+    return norm
+
+
+def mixed_irreps_total_channels(irrep_mix) -> int:
+    """Total channel count of a mixed-irrep latent: ``Σ mult_i · dim_i``."""
+    return sum(mult * _irrep_dim(name) for name, mult in _normalise_irrep_mix(irrep_mix))
+
+
+class RegularToMixedIrreps(nn.Module):
+    """Point-wise R2Conv from a BL-regular FieldType to a configurable mix
+    of irreps.
+
+    By Schur's lemma, an equivariant map from regular_1 to trivial only uses
+    the trivial sub-component (1-dim) of each input field — discarding sign
+    and any psi_k components. By emitting a richer mix, this projection lets
+    the latent carry information from those discarded sub-components, while
+    remaining equivariant: under rotation/flip the trivial channels stay
+    invariant, sign channels flip on reflection, and psi_k channels transform
+    as a steerable 2-D vector at frequency k.
+
+    The downstream non-equivariant decoder treats the resulting tensor as
+    plain channels (it cannot exploit the rotational structure of sign/psi_k
+    components), but the encoder is no longer bandwidth-bottlenecked at this
+    last 1×1 layer.
+
+    Args:
+        in_type:    input FieldType, typically ``[bl_repr] * N``.
+        irrep_mix:  list of ``(name, multiplicity)`` pairs. Recognised names:
+                    ``'trivial'`` (1-dim), ``'sign'`` (1-dim),
+                    ``'psi_k'`` for k=1..max_freq (2-dim each).
+                    Total output channels = ``Σ mult_i · dim_i``.
+
+    Example (M=2, 768 output channels):
+        irrep_mix = [('trivial', 192), ('sign', 192),
+                     ('psi_1', 96), ('psi_2', 96)]
+        → 192 + 192 + 192 + 192 = 768 channels, using all four irrep types.
+    """
+
+    def __init__(self, in_type: e2nn.FieldType, irrep_mix):
+        super().__init__()
+
+        gspace = in_type.gspace
+        G      = gspace.fibergroup
+        spec   = _normalise_irrep_mix(irrep_mix)
+        if not spec:
+            raise ValueError("irrep_mix must contain at least one entry with mult > 0")
+
+        reprs = []
+        for name, mult in spec:
+            irrep = G.irrep(*_irrep_name_to_id(name))
+            reprs.extend([irrep] * mult)
+        out_type = e2nn.FieldType(gspace, reprs)
+
+        # kernel_size = 1 → channel mix only, no spatial mixing
+        self.proj = e2nn.R2Conv(
+            in_type, out_type,
+            kernel_size=1, bias=True, initialize=True,
+        )
+
+        self.in_type, self.out_type = in_type, out_type
+        self.irrep_mix = spec
+        self.total_channels = out_type.size
 
     def forward(self, x: e2nn.GeometricTensor):
         return self.proj(x)
@@ -1087,8 +1327,10 @@ class EquivariantConvNeXtEncoder(nn.Module):
         latent_nonlinearity="none",
         pool_use_act: bool = True,
         antialiased_downsample: bool = True,
+        antialiased_stem: Optional[bool] = None,
         output_trivial: bool = True,
         output_scalars: int = None,
+        output_irreps=None,
         input_field_type=None,
         gspace=None,
     ):
@@ -1098,6 +1340,19 @@ class EquivariantConvNeXtEncoder(nn.Module):
         self.use_norm = use_norm
         self.output_trivial = output_trivial
         self.antialiased_downsample = antialiased_downsample
+        # output_irreps takes precedence over output_scalars when both are set.
+        # See ``RegularToMixedIrreps`` for the format: list of (name, mult)
+        # pairs, e.g. ``[('trivial', 384), ('sign', 384)]`` for an M=1 latent
+        # that uses both freq-0 irreps from each input regular field.
+        self.output_irreps = output_irreps
+        # antialiased_stem=None → inherit from antialiased_downsample (backward compat).
+        # Explicit False disables antialiasing only at the stem (stage 0 with
+        # include_stem=True). Useful to preserve fine-grained input detail for
+        # reconstruction while still antialiasing deeper stages where aliasing
+        # under continuous rotations is most harmful.
+        self.antialiased_stem = (
+            antialiased_downsample if antialiased_stem is None else antialiased_stem
+        )
         self.output_scalars = output_scalars
 
         # ───────────────────────────────────────────────────────────────
@@ -1172,7 +1427,14 @@ class EquivariantConvNeXtEncoder(nn.Module):
                     )
                 )
             else:
-                if antialiased_downsample:
+                # The "stem" is stage 0 of an include_stem=True encoder (i.e.
+                # operates on the original input resolution). Allow it to opt
+                # out of antialiasing independently — useful when reconstruction
+                # of fine-grained input detail matters and you'd rather not
+                # low-pass the input before the first downsampling step.
+                is_stem = (idx == 0 and include_stem)
+                use_antialiased = self.antialiased_stem if is_stem else antialiased_downsample
+                if use_antialiased:
                     # Antialiased pool (Gaussian blur + stride-2) followed by a
                     # 1×1 channel expander. The blur uses default centered padding
                     # p=(k-1)//2 so output is ceil(H/2) — identical shape to the
@@ -1192,7 +1454,7 @@ class EquivariantConvNeXtEncoder(nn.Module):
                     downsample = nn.Sequential(
                         e2nn.R2Conv(
                             prev_type, out_type,
-                            kernel_size=3, stride=2, padding=1,
+                            kernel_size=4, stride=2, padding=1,
                             bias=True, initialize=True,
                         ),
                     )
@@ -1232,12 +1494,22 @@ class EquivariantConvNeXtEncoder(nn.Module):
         self.out_type = self.blocks[-1].out_type  # last stage’s FieldType
 
         if self.output_trivial:
-            # If output_scalars not specified, default to number of fields (backward compatible)
-            n_scalars = self.output_scalars if self.output_scalars is not None else embedding_dims[-1]
-            self.regular2trivial = Regular2Trivial(
-                in_type=self.out_type,
-                n_scalars=n_scalars
-            )
+            # Variable kept as ``self.regular2trivial`` for backward
+            # compatibility with the forward path; can now hold either
+            # ``Regular2Trivial`` (trivial-only, default) or
+            # ``RegularToMixedIrreps`` (mixed-irrep output, Option B).
+            if self.output_irreps is not None:
+                self.regular2trivial = RegularToMixedIrreps(
+                    in_type=self.out_type,
+                    irrep_mix=self.output_irreps,
+                )
+            else:
+                # If output_scalars not specified, default to number of fields (backward compatible)
+                n_scalars = self.output_scalars if self.output_scalars is not None else embedding_dims[-1]
+                self.regular2trivial = Regular2Trivial(
+                    in_type=self.out_type,
+                    n_scalars=n_scalars
+                )
         else:
             self.regular2trivial = None
 
