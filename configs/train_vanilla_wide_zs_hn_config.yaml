@@ -1,0 +1,86 @@
+# VANILLA (non-equivariant) MultiplexAutoencoder at the WIDE pan-marker dims
+# [192, 384, 768] — the baseline partner for the equivariant zero-shot-hn runs.
+#
+# Same data, masking, optimizer, resolution (including the internal-64
+# downscale/upscale) and epoch budget as
+# configs/train_equivariant_v3_ddp_zs_hn_config.yaml, so the only difference is
+# the model. Single GPU (vanilla is far lighter than the escnn model).
+model_type: vanilla
+
+encoder:
+    # marker-agnostic part
+    ma_layers_blocks: [4,]
+    ma_embedding_dims: [16,]
+    # pan-marker part — the wide configuration
+    pm_layers_blocks: [4, 4, 4]
+    pm_embedding_dims: [192, 384, 768]
+    # Match the equivariant run's reduced-resolution mode: the 128x128 input is
+    # bilinearly downscaled to 64 before the model and the reconstruction is
+    # upscaled back to 128, so the loss is still computed at 128. The equivariant
+    # model needs this for memory; the vanilla baseline takes it purely so the two
+    # see the same internal resolution.
+    internal_image_size: 64
+
+    hyperkernel:
+      kernel_size: 1
+      padding: 0
+      stride: 1
+      use_bias: true
+
+decoder:
+  decoded_embed_dim: 512
+  num_blocks: 1
+
+  hyperkernel:
+      kernel_size: 1
+      padding: 0
+      stride: 1
+      use_bias: true
+
+# Data configuration
+# zero-shot-hn panel (27 datasets, 'hn' held out) with tscratch paths — the
+# upstream all_panels_config.yaml points at a /raid_encrypted path that does not
+# exist on this cluster.
+panel_config: configs/all_panels_config_tscratch_zs_hn.yaml
+tokenizer_config: configs/all_markers_tokenizer.yaml
+input_image_size: [128, 128]
+num_workers: 8
+batch_size: 8
+
+data_config:
+  # tscratch data (immuvis_split_patches_onlyarcsinh) is ALREADY arcsinh-transformed,
+  # so preprocessing is disabled to avoid applying arcsinh twice.
+  preprocessing_func: null
+  scaling_func: percentile
+  denoising_func: butterworth
+  normalization_func: null
+  operation_order: [transform, preprocessing, denoising, scaling]
+  file_extension: npy
+  preprocessing_kwargs: {}
+  denoising_kwargs: {}
+  scaling_kwargs: {}
+  normalization_kwargs: {}
+
+# Training configuration (identical to the equivariant zs-hn run)
+device: cuda
+lr: 5e-4
+final_lr: 1e-5
+weight_decay: 0.0001
+gradient_accumulation_steps: 1
+epochs: 200
+frac_warmup_steps: 0.1
+min_channels_frac: 0.75
+spatial_masking_ratio: 0.6
+fully_masked_channels_max_frac: 0.5
+mask_patch_size: 8
+from_checkpoint: last
+checkpoints_dir: /net/tscratch/people/plgslukasik/immu-vis/multiplex-image-model/checkpoints_vanilla_wide_zs_hn
+save_checkpoint_freq: 10
+beta: 0.5
+
+# Comet.ml: no API key -> init_experiment falls back to an offline experiment.
+run_name: vanilla-wide-zs-hn
+tags: [vanilla, wide-pm-192-384-768, internal64, 1gpu, zeroshot-hn, 200ep]
+comet_project: multiplex-equivariant
+comet_workspace: null
+comet_api_key: null

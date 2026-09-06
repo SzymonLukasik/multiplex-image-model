@@ -1,5 +1,6 @@
 """Logging and visualization utilities for training and validation."""
 
+import os
 import re
 from datetime import datetime
 from io import BytesIO
@@ -321,21 +322,25 @@ def init_experiment(config: dict[str, Any]) -> None:
         config (dict[str, Any]): Configuration dictionary containing Comet.ml settings
     """
     global _experiment
+    # Fall back to an OFFLINE experiment when no API key is available (config or
+    # COMET_API_KEY env). Offline runs log to a local .zip and need no account,
+    # so training works out-of-the-box; with a key the behaviour is unchanged.
+    api_key = config.get("comet_api_key") or os.environ.get("COMET_API_KEY")
+    online = api_key is not None
     _experiment = comet_ml.start(
         project_name=config["comet_project"],
         workspace=config.get("comet_workspace"),
-        api_key=config.get(
-            "comet_api_key"
-        ),  # Can also be set via env var COMET_API_KEY
+        api_key=api_key,
+        online=online,
     )
     run_name = config.get("run_name", None)
     if run_name is None:
-        # Get next version number from Comet.ml
-        if config.get("use_versioning", True):
+        # Version numbering requires the online Comet API; offline runs use a timestamp.
+        if online and config.get("use_versioning", True):
             version = get_next_version_number(
                 project_name=config["comet_project"],
                 workspace=config.get("comet_workspace"),
-                api_key=config.get("comet_api_key"),
+                api_key=api_key,
             )
             run_name = f"ImVs-{version}"
         else:

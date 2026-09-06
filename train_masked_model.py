@@ -38,6 +38,32 @@ from multiplex_model.utils import (
 )
 
 
+def build_model(model_config: dict, model_type: str):
+    """Construct the autoencoder selected by ``model_type``.
+
+    The equivariant model is imported lazily so the vanilla path never pays for
+    escnn (and a broken escnn install can't break vanilla training).
+    """
+    if model_type == "fully_equivariant_v3":
+        from multiplex_model.modules.equivariant import EquivariantMultiplexAutoencoderV3
+
+        return EquivariantMultiplexAutoencoderV3(**model_config)
+    return MultiplexAutoencoder(**model_config)
+
+
+def load_model_from_checkpoint(checkpoint, model_config: dict, model_type: str):
+    """Load the ``model_type``-selected autoencoder from a checkpoint."""
+    if model_type == "fully_equivariant_v3":
+        from multiplex_model.modules.equivariant import EquivariantMultiplexAutoencoderV3
+
+        return EquivariantMultiplexAutoencoderV3.load_from_checkpoint(
+            checkpoint, model_config=model_config
+        )
+    return MultiplexAutoencoder.load_from_checkpoint(
+        checkpoint, model_config=model_config
+    )
+
+
 def train_masked(
     model,
     optimizer,
@@ -56,10 +82,18 @@ def train_masked(
     start_epoch=0,
     save_checkpoint_every=5,
     checkpoints_path="checkpoints",
+    use_amp=True,
 ):
-    """Train a masked autoencoder (decode the remaining channels) with the given parameters."""
+    """Train a masked autoencoder (decode the remaining channels) with the given parameters.
+
+    ``use_amp`` gates bfloat16 autocast + GradScaler. It is safe for the escnn
+    equivariant model: the original pipeline trained it under bf16 autocast and
+    those checkpoints keep EXACT 90-degree equivariance, so the steerable
+    structure survives. The loss is always computed in fp32, and non-finite
+    steps are skipped. (Equivariance *evaluation* should still use fp32.)
+    """
     model.train()
-    scaler = GradScaler()
+    scaler = GradScaler(enabled=use_amp)
     run_name = get_run_name()
 
     if not os.path.exists(checkpoints_path):
@@ -89,13 +123,22 @@ def train_masked(
                 masked_img, spatial_masking_ratio, mask_patch_size
             )
 
-            with autocast(device_type="cuda", dtype=torch.bfloat16):
+            with autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_amp):
                 output = model(masked_img, active_channel_ids, channel_ids)["output"]
                 mi, logvar = output.unbind(dim=-1)
                 mi = torch.sigmoid(mi)
                 logvar = ClampWithGrad.apply(logvar, -15.0, 15.0)
 
-                loss = beta_nll_loss(img, mi, logvar, beta=beta)
+            # Loss in fp32 even under bf16 autocast: the Gaussian NLL involves
+            # exp(-logvar)/log terms that are precision-sensitive. Mirrors the
+            # recipe the original equivariant runs used.
+            loss = beta_nll_loss(img.float(), mi.float(), logvar.float(), beta=beta)
+
+            if not torch.isfinite(loss):
+                print(f"Non-finite loss at batch {batch_idx}, epoch {epoch} - skipping",
+                      flush=True)
+                optimizer.zero_grad(set_to_none=True)
+                continue
 
             scaler.scale(loss / gradient_accumulation_steps).backward()
 
@@ -117,6 +160,14 @@ def train_masked(
                     step=step,
                 )
                 step += 1
+
+
+        # --- peak GPU memory for this epoch's training pass (OOM headroom) ---
+        _pk = torch.cuda.max_memory_allocated() / 1024**3
+        _rs = torch.cuda.max_memory_reserved() / 1024**3
+        print(f"[mem] epoch {epoch}: peak allocated {_pk:.2f} GiB | "
+              f"peak reserved {_rs:.2f} GiB", flush=True)
+        torch.cuda.reset_peak_memory_stats()
 
         test_masked(
             model,
@@ -366,13 +417,12 @@ if __name__ == "__main__":
     if config.resolve_checkpoint():
         print(f"Loading model from checkpoint: {config.from_checkpoint}")
         checkpoint = torch.load(config.from_checkpoint, map_location=device)
-        model = MultiplexAutoencoder.load_from_checkpoint(
-            checkpoint,
-            model_config=model_config,
+        model = load_model_from_checkpoint(
+            checkpoint, model_config, config.model_type
         ).to(device)
         start_epoch = checkpoint.get("epoch", -1) + 1
     else:
-        model = MultiplexAutoencoder(**model_config).to(device)
+        model = build_model(model_config, config.model_type).to(device)
 
     # Setup optimizer and scheduler
     total_steps = (
@@ -422,6 +472,11 @@ if __name__ == "__main__":
         save_checkpoint_every=config.save_checkpoint_freq,
         checkpoints_path=config.checkpoints_dir,
         beta=config.beta,
+        # bf16 for the equivariant model too: the original pipeline trained
+        # FullyEquivariantConvnextV3 under bf16 autocast, and those checkpoints
+        # retain EXACT 90-degree equivariance (corr 1.0000) — the steerable
+        # structure survives reduced-precision training. Loss stays fp32.
+        use_amp=True,
     )
 
     finish_experiment()

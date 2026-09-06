@@ -35,7 +35,12 @@ dependencies = [
     "scikit-learn==1.7.1",
     "seaborn==0.13.2",
     "ruamel.yaml==0.18.14",
-    "opencv-python==4.12.0.88"
+    "opencv-python==4.12.0.88",
+    # escnn 1.0.12+ is not on PyPI (caps at 1.0.11); the equivariant model was
+    # developed/validated on 1.0.13 from GitHub. Pin that exact commit so the
+    # fresh venv reproduces the trained checkpoints' behavior. (PyPI 'escnn>=1.0.11'
+    # is likely API-compatible if a git install is undesirable.)
+    "escnn @ git+https://github.com/QUVA-Lab/escnn.git@9ad44cc37d694d9c805c4fef4d16722a254b3bf2"
 ]
 
 [project.optional-dependencies]

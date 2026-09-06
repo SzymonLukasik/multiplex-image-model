@@ -1,4 +1,5 @@
 import copy
+import math
 from typing import Literal
 
 import torch
@@ -291,6 +292,8 @@ class MultiplexImageDecoder(nn.Module):
         hyperkernel_config: dict,
         num_outputs: int = 2,
         block_type: str | type[Block] | dict = "convnext",
+        upsample_type: Literal["pixel_shuffle", "progressive"] = "pixel_shuffle",
+        upsample_dims: list[int] | None = None,
     ) -> None:
         """
         Args:
@@ -303,12 +306,29 @@ class MultiplexImageDecoder(nn.Module):
             num_outputs (int, optional): Number of output channels per marker. Defaults to 2.
             block_type (str | Type[Block] | dict, optional): Type of block to use.
                 Can be a string (registry name), Block class, or config dict. Defaults to "convnext".
+            upsample_type (str, optional): How the bottleneck is taken to full resolution.
+
+                ``'pixel_shuffle'`` (default, unchanged): a single 1x1 conv to
+                ``scaling_factor**2 * num_outputs`` followed by a shuffle reshape. All
+                nonlinear compute happens at the latent grid; the upsample itself is one
+                linear map per latent position, with no mixing between output tiles.
+
+                ``'progressive'``: ``log2(scaling_factor)`` stages of
+                ``ConvTranspose2d(k=4, s=2, p=1) -> LayerNorm -> GELU``, then a 1x1
+                readout. This mirrors the equivariant V3 decoder's upsample path
+                (transposed_conv + EquivariantPixelLN + NormNonLinearity per stage) in
+                non-equivariant terms, so the two decoders differ only by equivariance
+                rather than by having nonlinearity above the latent grid at all.
+            upsample_dims (list[int], optional): Output channels of each progressive
+                stage. Defaults to ``decoded_embed_dim`` at every stage. Only used when
+                ``upsample_type='progressive'``.
         """
         super().__init__()
         self.scaling_factor = scaling_factor
         self.num_channels = num_channels
         self.decoded_embed_dim = decoded_embed_dim
         self.num_outputs = num_outputs
+        self.upsample_type = upsample_type
 
         # Resolve block class and parameters
         block_cls = resolve_block_class(block_type)
@@ -334,9 +354,42 @@ class MultiplexImageDecoder(nn.Module):
                 for _ in range(num_blocks)
             ]
         )
-        self.pred = nn.Conv2d(
-            decoded_embed_dim, scaling_factor**2 * self.num_outputs, kernel_size=1
-        )
+        if upsample_type == "pixel_shuffle":
+            self.upsamples = None
+            self.pred = nn.Conv2d(
+                decoded_embed_dim, scaling_factor**2 * self.num_outputs, kernel_size=1
+            )
+        elif upsample_type == "progressive":
+            num_stages = int(math.log2(scaling_factor))
+            if 2**num_stages != scaling_factor:
+                raise ValueError(
+                    f"upsample_type='progressive' needs a power-of-2 scaling_factor, "
+                    f"got {scaling_factor}"
+                )
+            if upsample_dims is None:
+                upsample_dims = [decoded_embed_dim] * num_stages
+            if len(upsample_dims) != num_stages:
+                raise ValueError(
+                    f"upsample_dims must have {num_stages} entries "
+                    f"(log2 of scaling_factor {scaling_factor}), got {len(upsample_dims)}"
+                )
+            dims = [decoded_embed_dim, *upsample_dims]
+            self.upsamples = nn.ModuleList(
+                nn.Sequential(
+                    nn.ConvTranspose2d(
+                        dims[i], dims[i + 1], kernel_size=4, stride=2, padding=1
+                    ),
+                    LayerNorm(dims[i + 1], data_format="channels_first"),
+                    nn.GELU(),
+                )
+                for i in range(num_stages)
+            )
+            self.pred = nn.Conv2d(dims[-1], self.num_outputs, kernel_size=1)
+        else:
+            raise ValueError(
+                f"upsample_type must be 'pixel_shuffle' or 'progressive', "
+                f"got {upsample_type!r}"
+            )
 
     def forward(self, x: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
         """Forward pass of the Multiplex Image Decoder.
@@ -357,6 +410,14 @@ class MultiplexImageDecoder(nn.Module):
         x = x.reshape(N, E, H, W)
 
         x = self.decoder(x)
+
+        if self.upsample_type == "progressive":
+            for stage in self.upsamples:
+                x = stage(x)
+            x = self.pred(x)  # [N, O, H*A, W*A]
+            x = x.reshape(B, C, O, H * A, W * A)
+            return x.permute(0, 1, 3, 4, 2)  # [B, C, H*A, W*A, O]
+
         x = self.pred(x)
 
         x = x.reshape(N, A, A, O, H, W).reshape(B, C, A, A, O, H, W)
@@ -368,7 +429,21 @@ class MultiplexImageDecoder(nn.Module):
 
 
 class MultiplexAutoencoder(nn.Module):
-    """Multiplex image Autoencoder with Hyperkernel and Multiplex Image Encoder-Decoder."""
+    """Multiplex image Autoencoder with Hyperkernel and Multiplex Image Encoder-Decoder.
+
+    Supports the same optional reduced-resolution mode as
+    ``EquivariantMultiplexAutoencoderV3``: when ``encoder_config`` carries
+    ``internal_image_size``, the input is bilinearly downscaled to that square size
+    before the model and the reconstruction is bilinearly upscaled back, so the
+    loss is still computed at the original resolution by the unchanged training
+    loop. This exists so the vanilla baseline can be run at the same internal
+    resolution as the memory-heavy equivariant model.
+
+    When the knob is set, ``encode()`` must be called before ``decode()`` for the
+    same batch: ``encode`` stashes the pre-downscale spatial size that ``decode``
+    needs to upscale back. With the knob unset (the default) the model is
+    completely unchanged and ``decode`` is usable standalone.
+    """
 
     def __init__(
         self,
@@ -389,6 +464,12 @@ class MultiplexAutoencoder(nn.Module):
             "encoder_config": copy.deepcopy(encoder_config),
             "decoder_config": copy.deepcopy(decoder_config),
         }
+
+        # Resolution knob; it is not an argument of MultiplexImageEncoder, so it is
+        # stripped here (but kept in _architecture_config so checkpoints round-trip).
+        encoder_config = dict(encoder_config)
+        self._internal_size = encoder_config.pop("internal_image_size", None)
+        self._external_hw = None  # (H, W) of the input before downscaling
 
         self.latent_dim = encoder_config["pm_embedding_dims"][-1]
         self.num_channels = num_channels
@@ -467,6 +548,41 @@ class MultiplexAutoencoder(nn.Module):
         model.load_state_dict(checkpoint_data["model_state_dict"], strict=strict)
         return model
 
+    def _downscale(
+        self, x: torch.Tensor, spatial_mask: torch.Tensor | None
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Bilinearly downscale the input (and its mask) to the internal size."""
+        self._external_hw = tuple(x.shape[-2:])
+        if self._internal_size is None or x.shape[-1] == self._internal_size:
+            return x, spatial_mask
+
+        size = (self._internal_size, self._internal_size)
+        x = F.interpolate(x, size=size, mode="bilinear", align_corners=False)
+        if spatial_mask is not None:
+            # nearest keeps the mask boolean and the masked patches aligned
+            spatial_mask = (
+                F.interpolate(spatial_mask.float(), size=size, mode="nearest") > 0.5
+            )
+        return x, spatial_mask
+
+    def _upscale(self, recon: torch.Tensor) -> torch.Tensor:
+        """Bilinearly upscale a [B, C, h, w, O] reconstruction back to the input size."""
+        if self._internal_size is None:
+            return recon
+        if self._external_hw is None:
+            raise RuntimeError(
+                "decode() was called before encode(); with internal_image_size set, "
+                "encode() must run first to record the input resolution."
+            )
+        if tuple(recon.shape[2:4]) == self._external_hw:
+            return recon
+
+        B, C, h, w, O = recon.shape
+        H, W = self._external_hw
+        r = recon.permute(0, 1, 4, 2, 3).reshape(B, C * O, h, w)
+        r = F.interpolate(r, size=(H, W), mode="bilinear", align_corners=False)
+        return r.reshape(B, C, O, H, W).permute(0, 1, 3, 4, 2).contiguous()
+
     def encode(
         self,
         x: torch.Tensor,
@@ -485,6 +601,7 @@ class MultiplexAutoencoder(nn.Module):
         Returns:
             dict: A dictionary containing the encoded images tensor (under 'output') and optionally the features.
         """
+        x, spatial_mask = self._downscale(x, spatial_mask)
         encoding_output = self.encoder(
             x,
             encoded_indices,
@@ -512,7 +629,7 @@ class MultiplexAutoencoder(nn.Module):
             torch.Tensor: Decoded images tensor with shape (B, C, H, W).
         """
         x = self.decoder(x, decoded_indices)
-        return x
+        return self._upscale(x)
 
     def forward(
         self,

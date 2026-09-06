@@ -1,0 +1,104 @@
+# VANILLA (non-equivariant) MultiplexAutoencoder at the WIDE pan-marker dims
+# [192, 384, 768], with a PROGRESSIVE decoder instead of the single-shot linear
+# pixel-shuffle head.
+#
+# Purpose: close the decoder half of the equiv-vs-vanilla confound. The stock
+# vanilla decoder does ALL of its nonlinear compute at the 8x8 latent grid and
+# then upsamples 8x8 -> 64x64 with one linear 1x1 conv per latent position. The
+# equivariant V3 decoder instead refines progressively (transposed_conv +
+# EquivariantPixelLN + NormNonLinearity at 16, 32 and 64 px). That asymmetry is a
+# fair objection to any "equivariance helps" claim, independent of whether it
+# explains the MSE gap (job 3106065 showed it does not: the gap is ~35% DC modes).
+#
+# This is a ONE-VARIABLE change from configs/train_vanilla_wide_zs_hn_config.yaml
+# (job 3057428) — everything else (data, masking, optimizer, resolution, batch,
+# epoch budget) is byte-identical, so the two are directly comparable.
+#
+# NOTE: latent width is deliberately NOT matched here (vanilla 768 real channels
+# vs equivariant 512 fields x 10 = 5120). This run isolates the decoder only; the
+# width axis stays open and needs its own bracket.
+model_type: vanilla
+
+encoder:
+    # marker-agnostic part
+    ma_layers_blocks: [4,]
+    ma_embedding_dims: [16,]
+    # pan-marker part — the wide configuration
+    pm_layers_blocks: [4, 4, 4]
+    pm_embedding_dims: [192, 384, 768]
+    # Match the equivariant run's reduced-resolution mode: the 128x128 input is
+    # bilinearly downscaled to 64 before the model and the reconstruction is
+    # upscaled back to 128, so the loss is still computed at 128. Internal 64 with
+    # 3 encoder downsamples gives an 8x8 latent, hence 3 upsample stages below.
+    internal_image_size: 64
+
+    hyperkernel:
+      kernel_size: 1
+      padding: 0
+      stride: 1
+      use_bias: true
+
+decoder:
+  decoded_embed_dim: 512
+  num_blocks: 1
+
+  # Progressive upsampling: 8x8 -> 16 -> 32 -> 64, each stage
+  # ConvTranspose2d(k=4,s=2,p=1) -> LayerNorm -> GELU, then a 1x1 readout.
+  # The channel schedule mirrors the equivariant V3 field_dim_schedule
+  # [128, 96, 64] (ratios 1 : 0.75 : 0.5) applied to this bottleneck width.
+  upsample_type: progressive
+  upsample_dims: [512, 384, 256]
+
+  hyperkernel:
+      kernel_size: 1
+      padding: 0
+      stride: 1
+      use_bias: true
+
+# Data configuration
+# zero-shot-hn panel (27 datasets, 'hn' held out) with tscratch paths — the
+# upstream all_panels_config.yaml points at a /raid_encrypted path that does not
+# exist on this cluster.
+panel_config: configs/all_panels_config_tscratch_zs_hn.yaml
+tokenizer_config: configs/all_markers_tokenizer.yaml
+input_image_size: [128, 128]
+num_workers: 8
+batch_size: 8
+
+data_config:
+  # tscratch data (immuvis_split_patches_onlyarcsinh) is ALREADY arcsinh-transformed,
+  # so preprocessing is disabled to avoid applying arcsinh twice.
+  preprocessing_func: null
+  scaling_func: percentile
+  denoising_func: butterworth
+  normalization_func: null
+  operation_order: [transform, preprocessing, denoising, scaling]
+  file_extension: npy
+  preprocessing_kwargs: {}
+  denoising_kwargs: {}
+  scaling_kwargs: {}
+  normalization_kwargs: {}
+
+# Training configuration (identical to the equivariant zs-hn run)
+device: cuda
+lr: 5e-4
+final_lr: 1e-5
+weight_decay: 0.0001
+gradient_accumulation_steps: 1
+epochs: 200
+frac_warmup_steps: 0.1
+min_channels_frac: 0.75
+spatial_masking_ratio: 0.6
+fully_masked_channels_max_frac: 0.5
+mask_patch_size: 8
+from_checkpoint: last
+checkpoints_dir: /net/tscratch/people/plgslukasik/immu-vis/multiplex-image-model/checkpoints_vanilla_wide_progdec_zs_hn
+save_checkpoint_freq: 10
+beta: 0.5
+
+# Comet.ml: no API key -> init_experiment falls back to an offline experiment.
+run_name: vanilla-wide-progdec-zs-hn
+tags: [vanilla, wide-pm-192-384-768, progressive-decoder, internal64, 1gpu, zeroshot-hn, 200ep]
+comet_project: multiplex-equivariant
+comet_workspace: null
+comet_api_key: null

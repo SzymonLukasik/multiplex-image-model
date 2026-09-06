@@ -4,7 +4,7 @@ import csv
 import os
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from ruamel.yaml import YAML
 
 from .train_logging import get_run_name
@@ -72,6 +72,17 @@ class EncoderConfig(BaseModel):
     )
     hyperkernel_config: HyperkernelConfig = Field(
         ..., description="Hyperkernel configuration", alias="hyperkernel"
+    )
+    internal_image_size: int | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "If set, bilinearly downscale the input to this square size before the "
+            "model (and upscale the reconstruction back to the original size, so the "
+            "loss is computed at the original resolution). Mirrors the equivariant "
+            "encoder knob so a vanilla baseline can run at the same internal "
+            "resolution as the memory-heavy equivariant model."
+        ),
     )
     use_latent_norm: bool = Field(
         default=True,
@@ -164,6 +175,23 @@ class DecoderConfig(BaseModel):
         default="convnext",
         description="Block type to use in decoder. Can be string or dict with 'type' and 'module_parameters'.",
     )
+    upsample_type: Literal["pixel_shuffle", "progressive"] = Field(
+        default="pixel_shuffle",
+        description=(
+            "Upsample path. 'pixel_shuffle' (default) is a single linear 1x1 conv + "
+            "shuffle, with no nonlinearity above the latent grid. 'progressive' uses "
+            "log2(scaling_factor) stages of ConvTranspose2d + LayerNorm + GELU, "
+            "mirroring the equivariant V3 decoder's upsample path."
+        ),
+    )
+    upsample_dims: list[int] | None = Field(
+        default=None,
+        description=(
+            "Output channels per progressive upsample stage; must have "
+            "log2(scaling_factor) entries. Defaults to decoded_embed_dim throughout. "
+            "Only used when upsample_type='progressive'."
+        ),
+    )
 
     @field_validator("block_type", mode="before")
     @classmethod
@@ -175,6 +203,39 @@ class DecoderConfig(BaseModel):
         return ModuleConfig.from_string_or_dict(v)
 
     model_config = ConfigDict(extra="forbid")
+
+
+class EquivariantEncoderConfig(BaseModel):
+    """Encoder configuration for the fully-equivariant (escnn) autoencoder.
+
+    Permissive by design (``extra="allow"``): the escnn encoder consumes its
+    config as a plain dict with many rarely-changed knobs (irrep mixes, frequency
+    schedules, antialiasing, gating…). Over-strict typing here breaks every time
+    the model gains a field, so only the migration-specific knob is declared and
+    everything else passes through unchanged to the model constructor.
+    """
+
+    internal_image_size: int | None = Field(
+        default=None,
+        description=(
+            "If set, bilinearly downscale the input to this square size before the "
+            "escnn core (and upscale the reconstruction back to the original size, "
+            "so the loss is computed at the original resolution). Lets the "
+            "memory-heavy equivariant model train at reduced internal resolution "
+            "(e.g. 64) while staying comparable to full-resolution baselines."
+        ),
+    )
+
+    model_config = ConfigDict(extra="allow")
+
+
+class EquivariantDecoderConfig(BaseModel):
+    """Decoder configuration for the fully-equivariant (escnn) autoencoder.
+
+    Permissive (``extra="allow"``) for the same reason as EquivariantEncoderConfig.
+    """
+
+    model_config = ConfigDict(extra="allow")
 
 
 class DataConfig(BaseModel):
@@ -391,12 +452,37 @@ class TrainingConfig(BaseModel):
     mask_patch_size: int = Field(..., gt=0, description="Size of spatial mask patches")
 
     # Model architecture
-    encoder_config: EncoderConfig = Field(
+    model_type: Literal["vanilla", "fully_equivariant_v3"] = Field(
+        default="vanilla",
+        description=(
+            "Which autoencoder to build. 'vanilla' → MultiplexAutoencoder "
+            "(registry-pluggable ConvNeXt/Swin/ViT). 'fully_equivariant_v3' → the "
+            "escnn EquivariantMultiplexAutoencoderV3."
+        ),
+    )
+    encoder_config: EncoderConfig | EquivariantEncoderConfig = Field(
         ..., description="Encoder configuration", alias="encoder"
     )
-    decoder_config: DecoderConfig = Field(
+    decoder_config: DecoderConfig | EquivariantDecoderConfig = Field(
         ..., description="Decoder configuration", alias="decoder"
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _route_architecture_config(cls, data):
+        """Pick strict (vanilla) vs permissive (equivariant) encoder/decoder config
+        classes based on ``model_type``, before field validation. Constructing the
+        instance explicitly here avoids Union ambiguity (a vanilla dict would
+        otherwise also validate against the permissive equivariant model)."""
+        if isinstance(data, dict):
+            equivariant = data.get("model_type") == "fully_equivariant_v3"
+            enc_cls = EquivariantEncoderConfig if equivariant else EncoderConfig
+            dec_cls = EquivariantDecoderConfig if equivariant else DecoderConfig
+            if isinstance(data.get("encoder"), dict):
+                data["encoder"] = enc_cls(**data["encoder"])
+            if isinstance(data.get("decoder"), dict):
+                data["decoder"] = dec_cls(**data["decoder"])
+        return data
 
     # Checkpoint parameters
     from_checkpoint: str | None = Field(
