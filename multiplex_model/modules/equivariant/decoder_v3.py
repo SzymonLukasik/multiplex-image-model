@@ -163,6 +163,45 @@ class EquivariantTransposedConvUpsample(nn.Module):
 # V3 decoder: single-block + frequency schedule (Design B from
 # MEMORY_EFFICIENT_EQUIVARIANT_DECODER.md). Heavy lifting at the bottleneck
 # (15×15) with ONE BLConvNeXt block; spatial upsample is now done via
+class EquivariantUpsampleConv(e2nn.EquivariantModule):
+    """R2Upsampling followed by R2Conv — the construction escnn recommends.
+
+    escnn's own docs warn on R2ConvTransposed:
+
+        "Transposed convolution can produce artifacts which can harm the
+         overall equivariance of the model. We suggest using R2Upsampling
+         combined with R2Conv to perform upsampling."
+
+    (escnn/nn/modules/conv/r2_transposed_convolution.py). The v3 decoder has
+    used the transposed form since v3.2, and a stage-wise equivariance probe
+    localises V3's off-axis degradation to exactly these layers.
+
+    This is NOT the same as the abandoned v3.0/v3.1 bilinear path, despite
+    looking similar. Those were dropped for "flat recon", which was later
+    traced to a missing between-stage EquivariantPixelLN and is fixed
+    independently by ``post_refine_norm`` — so the interpolation was likely
+    blamed for a normalisation bug. That fix is on by default in the current
+    config, which is what makes this worth re-testing rather than a repeat.
+    """
+
+    def __init__(self, in_type, out_type, upscale_factor: int = 2,
+                 kernel_size: int = 3, padding: int = 1,
+                 mode: str = 'bilinear', align_corners: bool = False):
+        super().__init__()
+        self.in_type, self.out_type = in_type, out_type
+        self.up = e2nn.R2Upsampling(in_type, scale_factor=upscale_factor,
+                                    mode=mode, align_corners=align_corners)
+        self.conv = e2nn.R2Conv(in_type, out_type, kernel_size=kernel_size,
+                                padding=padding, bias=True)
+
+    def forward(self, x: e2nn.GeometricTensor) -> e2nn.GeometricTensor:
+        return self.conv(self.up(x))
+
+    def evaluate_output_shape(self, input_shape):
+        b, c, h, w = input_shape
+        return (b, self.out_type.size, h * 2, w * 2)
+
+
 # equivariant pixel-shuffle (v3.2; replaces v3.1's bilinear + 3×3 R2Conv).
 #
 # Concurrently fixes both root causes from
@@ -231,6 +270,7 @@ class EquivariantMultiplexImageDecoderV3(nn.Module):
         gate_bias_init: float = 1.0,
         mean_head_bias_init: float = -2.2,   # logit(0.1) — IMC channel-mean prior
         post_refine_norm: bool = False,      # cheap EquivariantPixelLN between refine_conv and refine_act
+        refine_norm_type: str = 'pixel_ln',  # 'pixel_ln' (ours) | 'field_norm' (escnn stock)
         upsample_type: str = 'pixel_shuffle',  # 'pixel_shuffle' (v3.2) | 'transposed_conv' (Tier 3.1, equivariant)
         upsample_kernel_size: int = 4,        # transposed-conv geometry (only used for 'transposed_conv')
         upsample_padding: int = 1,
@@ -335,10 +375,10 @@ class EquivariantMultiplexImageDecoderV3(nn.Module):
         #   'transposed_conv' (Tier 3.1): an escnn R2ConvTransposed with a
         #       steerable basis — learnable *and* equivariant by construction.
         #       See `EquivariantTransposedConvUpsample`.
-        if upsample_type not in ('pixel_shuffle', 'transposed_conv'):
+        if upsample_type not in ('pixel_shuffle', 'transposed_conv', 'upsample_conv'):
             raise ValueError(
-                f"upsample_type must be 'pixel_shuffle' or 'transposed_conv', "
-                f"got {upsample_type!r}"
+                f"upsample_type must be 'pixel_shuffle', 'transposed_conv' or "
+                f"'upsample_conv', got {upsample_type!r}"
             )
         self.upsample_type = upsample_type
         self.upsamples = nn.ModuleList()
@@ -355,6 +395,16 @@ class EquivariantMultiplexImageDecoderV3(nn.Module):
                         upscale_factor=2,
                     )
                 )
+            elif upsample_type == 'upsample_conv':
+                self.upsamples.append(
+                    EquivariantUpsampleConv(
+                        in_type=prev_type,
+                        out_type=target_type,
+                        upscale_factor=2,
+                        kernel_size=upsample_kernel_size,
+                        padding=upsample_padding,
+                    )
+                )
             else:  # 'transposed_conv'
                 self.upsamples.append(
                     EquivariantTransposedConvUpsample(
@@ -366,11 +416,26 @@ class EquivariantMultiplexImageDecoderV3(nn.Module):
                         output_padding=upsample_output_padding,
                     )
                 )
-            self.refine_norms.append(
-                EquivariantPixelLNV2(target_type, eps=1e-6,
-                                     center_scalar=True, affine=True)
-                if post_refine_norm else nn.Identity()
-            )
+            # refine_norm_type selects WHICH equivariance-preserving norm sits
+            # between refine_conv and refine_act:
+            #   'pixel_ln'   - EquivariantPixelLNV2: centres the scalar component
+            #                  by the mean across ALL fields, scales by a SHARED
+            #                  mean per-field L2 (RMSNorm-style).
+            #   'field_norm' - escnn.nn.FieldNorm: centres each field by its OWN
+            #                  trivial projection, scales by its OWN norm.
+            # Both preserve equivariance; the ablation asks whether the
+            # cross-field coupling in 'pixel_ln' is what actually prevents the
+            # variance-soaking collapse, or whether any field normalisation does.
+            if not post_refine_norm:
+                _norm = nn.Identity()
+            elif refine_norm_type == "field_norm":
+                _norm = e2nn.FieldNorm(target_type, affine=True)
+            elif refine_norm_type == "pixel_ln":
+                _norm = EquivariantPixelLNV2(target_type, eps=1e-6,
+                                             center_scalar=True, affine=True)
+            else:
+                raise ValueError(f"unknown refine_norm_type {refine_norm_type!r}")
+            self.refine_norms.append(_norm)
             self.refine_acts.append(
                 e2nn.NormNonLinearity(target_type, function=norm_act_function))
             prev_type = target_type

@@ -48,6 +48,29 @@ def build_model(model_config: dict, model_type: str):
         from multiplex_model.modules.equivariant import EquivariantMultiplexAutoencoderV3
 
         return EquivariantMultiplexAutoencoderV3(**model_config)
+    if model_type == "legacy":
+        # Pre-downscaling checkpoints from the parent repo (e.g.
+        # ImmuVis-612-beta-768-ma1-zeroshot_hn). Their state_dict carries
+        # encoder.latent_norm.{weight,bias}, which MultiplexAutoencoder has no
+        # parameter for - loading them there with strict=False would silently
+        # drop the latent norm and produce plausible but wrong numbers.
+        import copy
+
+        from multiplex_model.modules_immuvis_legacy import MultiplexAutoencoderLegacy
+
+        # EncoderConfig always emits internal_image_size (default None) via
+        # model_dump(), and MultiplexAutoencoder pops it. The legacy encoder
+        # predates the knob and rejects it. Assert rather than silently drop:
+        # a legacy checkpoint cannot honour a downscale request, so asking for
+        # one must fail loudly instead of being quietly ignored.
+        model_config = copy.deepcopy(model_config)
+        internal = model_config["encoder_config"].pop("internal_image_size", None)
+        if internal is not None:
+            raise ValueError(
+                f"model_type 'legacy' cannot run at internal_image_size={internal}; "
+                "these checkpoints operate at the native input resolution."
+            )
+        return MultiplexAutoencoderLegacy(**model_config)
     return MultiplexAutoencoder(**model_config)
 
 
@@ -59,6 +82,12 @@ def load_model_from_checkpoint(checkpoint, model_config: dict, model_type: str):
         return EquivariantMultiplexAutoencoderV3.load_from_checkpoint(
             checkpoint, model_config=model_config
         )
+    if model_type == "legacy":
+        # Legacy checkpoints predate model_config/load_from_checkpoint: they hold
+        # only model_state_dict, so build from the YAML and load strictly.
+        model = build_model(model_config, model_type)
+        model.load_state_dict(checkpoint["model_state_dict"])
+        return model
     return MultiplexAutoencoder.load_from_checkpoint(
         checkpoint, model_config=model_config
     )
@@ -355,11 +384,22 @@ if __name__ == "__main__":
     TOKENIZER = config.tokenizer_config
     INV_TOKENIZER = {v: k for k, v in TOKENIZER.items()}
 
+    # train_augmentation: 'rotflip' (default, the ImmuVis protocol) applies
+    # RandomRotation(180) + RandomHorizontalFlip, i.e. the full O(2) symmetry the
+    # equivariant model encodes architecturally. 'crop_only' drops both, leaving
+    # the RandomCrop the pipeline needs to reach the target size. The ablation
+    # this enables: how much of a non-equivariant baseline's rotation robustness
+    # is supplied by augmentation rather than by architecture.
+    _aug = config.train_augmentation
+    print(f"Train augmentation: {_aug}")
+    _pre = ([RandomRotation(180, interpolation=InterpolationMode.BILINEAR)]
+            if _aug == "rotflip" else [])
+    _post = [RandomHorizontalFlip()] if _aug == "rotflip" else []
     train_transform = Compose(
         [
-            RandomRotation(180, interpolation=InterpolationMode.BILINEAR),
+            *_pre,
             RandomCrop(SIZE),
-            RandomHorizontalFlip(),
+            *_post,
         ]
     )
 
@@ -367,11 +407,16 @@ if __name__ == "__main__":
 
     dataset_kwargs = config.data_config.model_dump()
 
+    # Subsetting is applied to TRAIN ONLY - validation must stay full size or the
+    # val metric's noise would change with the fraction, making the curves across
+    # fractions incomparable.
     train_dataset = MultiplexDataset(
         panels_config=PANEL_CONFIG,
         split="train",
         marker_tokenizer=TOKENIZER,
         transform=train_transform,
+        subset_fraction=config.train_subset_fraction,
+        subset_seed=config.train_subset_seed,
         **dataset_kwargs,
     )
 
@@ -383,7 +428,9 @@ if __name__ == "__main__":
         **dataset_kwargs,
     )
 
-    train_batch_sampler = PanelBatchSampler(train_dataset, BATCH_SIZE)
+    train_batch_sampler = PanelBatchSampler(
+        train_dataset, BATCH_SIZE, batches_per_epoch=config.train_batches_per_epoch
+    )
     test_batch_sampler = PanelBatchSampler(test_dataset, BATCH_SIZE, shuffle=False)
 
     train_dataloader = DataLoader(

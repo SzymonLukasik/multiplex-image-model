@@ -1,5 +1,6 @@
 import os
 import random
+import hashlib
 from glob import glob
 from typing import Literal
 
@@ -18,6 +19,35 @@ from .transforms import (
     Pipeline,
     Identity,
 )
+
+def _subsample_paths(
+    paths: list[str], fraction: float, seed: int, dataset: str
+) -> list[str]:
+    """Deterministically keep `fraction` of one dataset's images.
+
+    Subsetting happens PER DATASET, not across the pooled list, so shrinking the
+    training set never removes a panel outright. That matters here: the model is
+    panel-conditioned through the marker tokenizer and hyperkernel, so dropping a
+    dataset would remove marker combinations and confound "less data" with "fewer
+    markers seen".
+
+    The RNG is seeded from (seed, sha256(dataset)) rather than from position in
+    the dataset list, so a given dataset's subset is identical no matter which
+    other datasets are configured, and `fraction` is nested: a larger fraction is
+    not guaranteed to be a superset, but a fixed fraction is reproducible across
+    runs and machines. `paths` must already be sorted - glob order is filesystem
+    dependent and would otherwise silently vary between runs.
+    """
+    if not 0.0 < fraction <= 1.0:
+        raise ValueError(f"subset_fraction must be in (0, 1], got {fraction}")
+    if fraction == 1.0 or not paths:
+        return paths
+    ds_hash = int.from_bytes(hashlib.sha256(dataset.encode()).digest()[:8], "big")
+    rng = np.random.default_rng([seed, ds_hash])
+    keep = max(1, int(round(fraction * len(paths))))
+    idx = np.sort(rng.choice(len(paths), size=keep, replace=False))
+    return [paths[i] for i in idx]
+
 
 class MultiplexDataset(Dataset):
     def __init__(
@@ -45,7 +75,8 @@ class MultiplexDataset(Dataset):
         scaling_kwargs: dict = {},
         normalization_kwargs: dict = {},
         outlier_pruning_kwargs: dict = {},
-
+        subset_fraction: float | None = None,
+        subset_seed: int = 0,
     ):
         """Dataset for loading multiplex images from multiple panels.
         The order of operations is given by `operation_order`.
@@ -124,8 +155,23 @@ class MultiplexDataset(Dataset):
         img_path = panels_config["paths"][split]
         self.imgs = []  # tuples of (img_path, dataset)
         for dataset in panels_config["datasets"]:
-            tiffs = glob(os.path.join(img_path, dataset, "imgs", f"*.{file_extension}"))
+            tiffs = sorted(
+                glob(os.path.join(img_path, dataset, "imgs", f"*.{file_extension}"))
+            )
+            if subset_fraction is not None:
+                tiffs = _subsample_paths(tiffs, subset_fraction, subset_seed, dataset)
             self.imgs.extend([(tiff, dataset) for tiff in tiffs])
+
+        if subset_fraction is not None:
+            # Fingerprint the exact selection so two runs can be PROVEN to have
+            # trained on the same images, rather than assumed to have.
+            digest = hashlib.sha256(
+                "\n".join(os.path.basename(t) for t, _ in self.imgs).encode()
+            ).hexdigest()[:16]
+            print(
+                f"[MultiplexDataset:{split}] subset_fraction={subset_fraction} "
+                f"seed={subset_seed} -> {len(self.imgs)} images, fingerprint={digest}"
+            )
 
         # Transformations declaration
         ds_percentiles = panels_config.get("clip_limits", None)
@@ -217,9 +263,18 @@ class MultiplexDataset(Dataset):
 class PanelBatchSampler(Sampler):
     """Sampler that yields batches of indices grouped by panels."""
 
-    def __init__(self, dataset, batch_size, shuffle=True):
+    def __init__(self, dataset, batch_size, shuffle=True, batches_per_epoch=None):
         self.batch_size = batch_size
         self.shuffle = shuffle
+        # Fixes the number of batches per epoch independently of dataset size.
+        # Used by the data-fraction ablation: with it, a 10% run does the same
+        # number of OPTIMISER UPDATES per epoch as the 100% run (it just revisits
+        # images more often), so "epoch" means the same thing at every fraction
+        # and the epoch budget, validation cadence and checkpoint cadence stay
+        # comparable. Without it, matching updates would mean running 10x the
+        # epochs, and validation - which always runs on the FULL val set - would
+        # come to dominate the cost.
+        self.batches_per_epoch = batches_per_epoch
 
         # Group indices by panel
         self.panel_to_indices = {}
@@ -235,8 +290,23 @@ class PanelBatchSampler(Sampler):
         self._generate_batches()  # Prepare the first epoch
 
     def _generate_batches(self):
-        """Generate batches ensuring each sample is used exactly once per epoch."""
-        self.epoch_batches = []  # Reset batches for the new epoch
+        """Build one epoch of batches.
+
+        Without ``batches_per_epoch`` this is one pass: every sample used exactly
+        once. With it, passes are concatenated (each reshuffled independently)
+        until the target count is reached, then truncated - so a short dataset is
+        revisited rather than producing a short epoch.
+        """
+        batches = self._one_pass()
+        if self.batches_per_epoch is not None:
+            while len(batches) < self.batches_per_epoch:
+                batches.extend(self._one_pass())
+            batches = batches[: self.batches_per_epoch]
+        self.epoch_batches = batches
+
+    def _one_pass(self):
+        """One pass over the data: each sample used exactly once."""
+        epoch_batches = []
 
         # Shuffle panels if needed
         if self.shuffle:
@@ -252,11 +322,12 @@ class PanelBatchSampler(Sampler):
             # Split indices into batches of batch_size
             for i in range(0, len(indices), self.batch_size):
                 batch = indices[i : i + self.batch_size]
-                self.epoch_batches.append(batch)
+                epoch_batches.append(batch)
 
         # Shuffle the final batch order for diversity
         if self.shuffle:
-            random.shuffle(self.epoch_batches)
+            random.shuffle(epoch_batches)
+        return epoch_batches
 
     def __iter__(self):
         """Yield batches, ensuring all images are used exactly once per epoch."""

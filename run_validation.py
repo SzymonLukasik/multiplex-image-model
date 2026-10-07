@@ -67,7 +67,7 @@ def parse_args():
     parser.add_argument("--checkpoint", type=str, required=True,
                         help="Path to the model checkpoint (.pth).")
     parser.add_argument("--model-type", type=str, default="auto",
-                        choices=["auto", "vanilla", "fully_equivariant_v3"],
+                        choices=["auto", "vanilla", "fully_equivariant_v3", "legacy"],
                         help="'auto' reads model_type from the config.")
     parser.add_argument("--panel-config", type=str, default=None,
                         help="Override the config's panel_config, e.g. the hn-only "
@@ -106,6 +106,11 @@ def parse_args():
                              "bypassed and the target is downscaled the same way the "
                              "model downscales its input, so the metric reflects the "
                              "reconstruction alone. Not comparable to runs without it.")
+    parser.add_argument("--limit-per-dataset", type=int, default=None,
+                        help="Keep at most N images per dataset (deterministic: the "
+                             "first N of the sorted file list). For multi-panel evals, "
+                             "where test-split sizes run from 5 to 1512 images and an "
+                             "uncapped run would be a statement about the largest panel.")
     parser.add_argument("--limit-images", type=int, default=None,
                         help="Evaluate only the first N test images. For smoke-testing "
                              "the pipeline on a compute node before the full run.")
@@ -334,6 +339,20 @@ def main():
         transform=TestCrop(crop_size),
         **config.data_config.model_dump(),
     )
+    if args.limit_per_dataset is not None:
+        # dataset.imgs is [(path, dataset), ...], already sorted per dataset, so
+        # taking the first N is reproducible without a seed.
+        kept, seen = [], {}
+        for path, ds in test_dataset.imgs:
+            if seen.get(ds, 0) < args.limit_per_dataset:
+                kept.append((path, ds))
+                seen[ds] = seen.get(ds, 0) + 1
+        print(f"--limit-per-dataset {args.limit_per_dataset}: "
+              f"{len(test_dataset.imgs)} -> {len(kept)} images across {len(seen)} datasets")
+        for ds in sorted(seen):
+            print(f"    {ds:<22} {seen[ds]:>4}")
+        test_dataset.imgs = kept
+
     print(f"Test dataset size: {len(test_dataset)} images")
 
     # batch_size=1: every image is expanded into its own leave-one-out batch, so

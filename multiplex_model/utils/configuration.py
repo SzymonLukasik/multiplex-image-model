@@ -436,6 +436,33 @@ class TrainingConfig(BaseModel):
     gradient_accumulation_steps: int = Field(
         ..., gt=0, description="Number of gradient accumulation steps"
     )
+    train_batches_per_epoch: int | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Fix the number of training batches per epoch regardless of dataset "
+            "size. Set this together with train_subset_fraction so a subset run "
+            "performs the same number of optimiser updates per epoch as the "
+            "full-data run. None (default) = one pass over the data."
+        ),
+    )
+
+    train_subset_fraction: float | None = Field(
+        default=None,
+        gt=0.0,
+        le=1.0,
+        description=(
+            "Fraction of the TRAINING images to keep, sampled per dataset so no "
+            "panel is dropped. None (default) uses everything. Validation and test "
+            "splits are never subset."
+        ),
+    )
+    train_subset_seed: int = Field(
+        default=0,
+        description="Seed for train_subset_fraction; fixed across arms so every "
+                    "model in an ablation sees the identical subset.",
+    )
+
     epochs: int = Field(..., gt=0, description="Number of training epochs")
     beta: float = Field(..., ge=0, description="Beta parameter for beta-NLL loss")
 
@@ -452,7 +479,16 @@ class TrainingConfig(BaseModel):
     mask_patch_size: int = Field(..., gt=0, description="Size of spatial mask patches")
 
     # Model architecture
-    model_type: Literal["vanilla", "fully_equivariant_v3"] = Field(
+    train_augmentation: Literal["rotflip", "crop_only"] = Field(
+        "rotflip",
+        description=(
+            "'rotflip' (default) = the ImmuVis protocol: RandomRotation(180) + "
+            "RandomHorizontalFlip, i.e. the full O(2) symmetry the equivariant model "
+            "encodes architecturally. 'crop_only' removes both, leaving only the "
+            "RandomCrop needed to reach the target size."
+        ),
+    )
+    model_type: Literal["vanilla", "fully_equivariant_v3", "legacy"] = Field(
         default="vanilla",
         description=(
             "Which autoencoder to build. 'vanilla' → MultiplexAutoencoder "

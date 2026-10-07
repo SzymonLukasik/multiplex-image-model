@@ -167,6 +167,16 @@ if __name__ == "__main__":
 
     config = FinetuneConfig(**raw_config)
 
+    if config.model_type != "vanilla":
+        raise NotImplementedError(
+            "Finetuning is currently implemented for the vanilla MultiplexAutoencoder "
+            f"only (got model_type={config.model_type!r}). The finetune path relies on "
+            "vanilla-specific marker-embedding expansion (_load_with_extended_embeddings) "
+            "and freeze modes that target vanilla submodule names; adapting them to the "
+            "escnn EquivariantHyperkernel is a separate task. Use train_masked_model.py "
+            "with model_type: fully_equivariant_v3 to (pre)train the equivariant model."
+        )
+
     device = config.device
     print(f"Using device: {device}")
 
