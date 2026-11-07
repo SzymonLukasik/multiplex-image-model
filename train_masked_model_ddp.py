@@ -455,8 +455,14 @@ if __name__ == "__main__":
         raw_config = yaml.load(f)
     config = TrainingConfig(**raw_config)
 
+    # Opt-in cuDNN autotuning (CUDNN_BENCHMARK=1): +4% throughput on V3 in
+    # _bench_v3_speedups.py. Only kernel selection changes, not the model or recipe.
+    if os.environ.get("CUDNN_BENCHMARK") == "1":
+        torch.backends.cudnn.benchmark = True
+
     if is_main_process():
-        print(f"World size: {world_size} | device: {device} | model_type: {config.model_type}")
+        print(f"World size: {world_size} | device: {device} | model_type: {config.model_type}"
+              f" | cudnn.benchmark: {torch.backends.cudnn.benchmark}")
 
     SIZE = config.input_image_size
     BATCH_SIZE = config.batch_size
@@ -561,9 +567,17 @@ if __name__ == "__main__":
         # param's device), so staging the whole ~10 GiB file in VRAM only burns
         # headroom. It is freed below once both restores are done.
         checkpoint = torch.load(ckpt_path, map_location="cpu")
+        # The model is rebuilt from the checkpoint's own model_config, so a YAML
+        # ma_grad_checkpoint would be ignored on resume. It is a memory switch with
+        # no parameters, so the YAML may turn it on for an existing run.
+        if model_config["encoder_config"].get("ma_grad_checkpoint"):
+            checkpoint["model_config"]["encoder_config"]["ma_grad_checkpoint"] = True
         model = load_model_from_checkpoint(
             checkpoint, model_config, config.model_type
         ).to(device)
+        if is_main_process() and model_config["encoder_config"].get("ma_grad_checkpoint"):
+            _on = sum(getattr(m, "grad_checkpoint", False) is True for m in model.modules())
+            print(f"[resume] ma_grad_checkpoint from YAML: active on {_on} module(s)", flush=True)
         start_epoch = checkpoint.get("epoch", -1) + 1
         if is_main_process():
             print(

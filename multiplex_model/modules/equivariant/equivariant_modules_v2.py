@@ -1,6 +1,8 @@
 # import e2cnn.group.groups
 
+import numpy as np
 import torch
+import torch.utils.checkpoint
 
 # --- Monkey-patch Tensor.__setitem__ to accept uint8 masks -------------
 _orig_setitem = torch.Tensor.__setitem__
@@ -646,6 +648,9 @@ class EquivariantMultiplexImageEncoder(nn.Module):
             output_scalars: int = None,
             output_irreps=None,
             output_trivial: bool = True,
+            nonlinearity: str = "norm",
+            fourier_N: int = 8,
+            ma_grad_checkpoint: bool = False,
     ):
         """Initialize the Multiplex Image Encoder.
 
@@ -701,6 +706,11 @@ class EquivariantMultiplexImageEncoder(nn.Module):
             antialiased_stem=antialiased_stem,
             output_trivial=False,           # keep BL-regular through MA→PM
             gspace=self._gspace,
+            nonlinearity=nonlinearity,
+            fourier_N=fourier_N,
+            # MA runs once per marker (B*C images), so its activations are what
+            # grow with panel size; checkpointing them lets ma=4 fit 4/GPU.
+            grad_checkpoint=ma_grad_checkpoint,
         )
 
         # The equivariant hyperkernel is pointwise (k=1) by construction.
@@ -755,7 +765,7 @@ class EquivariantMultiplexImageEncoder(nn.Module):
             self.ma_to_hk_adapter = None
 
         # Equivariant nonlinearity on the BL-regular field type
-        self.act = e2nn.NormNonLinearity(self.hyperkernel.out_type)
+        self.act = make_act(self.hyperkernel.out_type, nonlinearity, fourier_N)
 
         # pan-marker part — receives the hyperkernel's BL-regular field type
         self.pan_marker_encoder = EquivariantConvNeXtEncoder(
@@ -786,6 +796,8 @@ class EquivariantMultiplexImageEncoder(nn.Module):
             output_irreps=output_irreps,
             input_field_type=self.hyperkernel.out_type,
             gspace=self._gspace,
+            nonlinearity=nonlinearity,
+            fourier_N=fourier_N,
         )
 
     def forward(self, x: torch.Tensor, encoded_indices: torch.Tensor, return_features: bool = False) -> Dict:
@@ -1203,6 +1215,47 @@ class FieldLayerScale(nn.Module):
         return e2nn.GeometricTensor(t * gamma_per_channel, x.type)
 
 
+class FourierNormAct(nn.Module):
+    """Fourier pointwise ELU on a field type of K copies of bl_regular(max_freq).
+
+    Drop-in replacement for ``e2nn.NormNonLinearity``: escnn's ``FourierELU``
+    samples each field on a grid of the group (N rotations x 2 flips for O(2)),
+    applies ELU pointwise and transforms back. Its input representation is the
+    spectral regular representation over the same irreps as bl_regular, which
+    is checked numerically at construction, so the tensor is only re-wrapped.
+    """
+
+    def __init__(self, field_type: e2nn.FieldType, N: int = 8):
+        super().__init__()
+        gspace = field_type.gspace
+        rep = field_type.representations[0]
+        assert all(r == rep for r in field_type.representations), \
+            "FourierNormAct expects K identical bl_regular fields"
+        irreps = list(rep.irreps)
+        irreps = [ir for i, ir in enumerate(irreps) if ir not in irreps[:i]]
+        self.act = e2nn.FourierELU(gspace, len(field_type), irreps, type="regular", N=N)
+        act_rep = self.act.in_type.representations[0]
+        assert act_rep.size == rep.size, (act_rep.size, rep.size)
+        for _ in range(5):
+            g = gspace.fibergroup.sample()
+            assert np.allclose(rep(g), act_rep(g), atol=1e-6), \
+                "FourierELU input representation differs from bl_regular"
+        self.in_type = self.out_type = field_type
+
+    def forward(self, x: e2nn.GeometricTensor) -> e2nn.GeometricTensor:
+        y = self.act(e2nn.GeometricTensor(x.tensor, self.act.in_type))
+        return e2nn.GeometricTensor(y.tensor, x.type)
+
+
+def make_act(field_type: e2nn.FieldType, kind: str = "norm", N: int = 8) -> nn.Module:
+    """Equivariant nonlinearity used throughout the encoder ('norm' = original model)."""
+    if kind == "norm":
+        return e2nn.NormNonLinearity(field_type)
+    if kind == "fourier_elu":
+        return FourierNormAct(field_type, N)
+    raise ValueError(f"Unknown encoder nonlinearity: {kind!r}")
+
+
 class BLConvNeXtBlock(nn.Module):
     def __init__(self,
                  in_type: e2nn.FieldType,
@@ -1214,6 +1267,8 @@ class BLConvNeXtBlock(nn.Module):
         use_layerscale: bool = True,
         layerscale_init: float = 1e-6,
         gate_bias_init: float = 1.0,   # >0 starts gates ~open
+        nonlinearity: str = "norm",
+        fourier_N: int = 8,
     ):
         super().__init__()
 
@@ -1259,7 +1314,7 @@ class BLConvNeXtBlock(nn.Module):
 
 
         self.pw_up_feat = e2nn.R2Conv(in_type, mid_feat_type, kernel_size=1, bias=True, initialize=True)
-        self.act = e2nn.NormNonLinearity(mid_feat_type)
+        self.act = make_act(mid_feat_type, nonlinearity, fourier_N)
 
         # 4) gates: one trivial scalar per expanded bank
         if use_gating:
@@ -1326,6 +1381,9 @@ class EscnnConvNeXtBlocks(nn.Module):
         use_layerscale: bool = True,
         layerscale_init: float = 1e-6,
         gate_bias_init: float = 1.0,
+        nonlinearity: str = "norm",
+        fourier_N: int = 8,
+        grad_checkpoint: bool = False,
     ):
         super().__init__()
         self.blocks = nn.ModuleList(
@@ -1340,13 +1398,28 @@ class EscnnConvNeXtBlocks(nn.Module):
                     use_layerscale=use_layerscale,
                     layerscale_init=layerscale_init,
                     gate_bias_init=gate_bias_init,
+                    nonlinearity=nonlinearity,
+                    fourier_N=fourier_N,
                 )
                 for _ in range(num_blocks)
             ]
         )
         self.in_type = self.out_type = in_type
+        # Activation checkpointing per block: only each block's input is kept and
+        # its internals (4x-expanded mid fields, gates, norms) are recomputed in
+        # backward. Same filters, same maths -> identical gradients; costs one
+        # extra forward of these blocks. Training-only (no effect under no_grad).
+        self.grad_checkpoint = grad_checkpoint
 
     def forward(self, x: e2nn.GeometricTensor):
+        if self.grad_checkpoint and self.training and torch.is_grad_enabled():
+            t = x.tensor
+            for blk in self.blocks:
+                t = torch.utils.checkpoint.checkpoint(
+                    lambda tt, b=blk: b(e2nn.GeometricTensor(tt, self.in_type)).tensor,
+                    t, use_reentrant=False,
+                )
+            return e2nn.GeometricTensor(t, self.in_type)
         for blk in self.blocks:
             x = blk(x)
         return x
@@ -1381,6 +1454,9 @@ class EquivariantConvNeXtEncoder(nn.Module):
         output_irreps=None,
         input_field_type=None,
         gspace=None,
+        nonlinearity: str = "norm",
+        fourier_N: int = 8,
+        grad_checkpoint: bool = False,
     ):
         super().__init__()
         self.latent_nonlinearity = latent_nonlinearity
@@ -1520,7 +1596,7 @@ class EquivariantConvNeXtEncoder(nn.Module):
 
         if self.pool_use_act:
             self.acts = nn.ModuleList(
-                [e2nn.NormNonLinearity(t) for t in stage_types]
+                [make_act(t, nonlinearity, fourier_N) for t in stage_types]
             )
 
         self.blocks = nn.ModuleList(
@@ -1534,6 +1610,9 @@ class EquivariantConvNeXtEncoder(nn.Module):
                     use_layerscale=use_layerscale,
                     layerscale_init=layerscale_init,
                     gate_bias_init=gate_bias_init,
+                    nonlinearity=nonlinearity,
+                    fourier_N=fourier_N,
+                    grad_checkpoint=grad_checkpoint,
                 )
                 for t, n in zip(stage_types, layers_blocks)
             ]
