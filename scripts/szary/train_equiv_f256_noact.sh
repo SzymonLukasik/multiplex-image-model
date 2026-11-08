@@ -5,7 +5,7 @@
 #SBATCH --gpus=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=120G
-#SBATCH --time=10-00:00:00
+#SBATCH --time=7-00:00:00
 #SBATCH --output=logs/train_equiv_f256_noact_%j.out
 #SBATCH --error=logs/train_equiv_f256_noact_%j.err
 #
@@ -15,7 +15,7 @@
 #
 # Same chaining as train_equiv_f256.sh: the config sets `from_checkpoint: last` and a
 # last-checkpoint is written every epoch, so each link resumes where the previous one
-# hit the wall clock (10 days is the QOS maximum). Numbered checkpoints every 10 epochs.
+# hit the wall clock (7 days is the partition maximum; the QOS allows 10 but the partition does not). Numbered checkpoints every 10 epochs.
 #
 # GPU count is read from the allocation, so the same script serves both configs:
 #   sbatch scripts/szary/train_equiv_f256_noact.sh                 # 1 GPU, accumulation 2
