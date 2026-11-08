@@ -1,0 +1,118 @@
+# 2-GPU variant of train_equivariant_v3_zs_hn_f256_noact_szary_config.yaml: ONLY
+# gradient_accumulation_steps differs (2 -> 1). Same checkpoint dir / run name -> resumes 'last'.
+# TRANSITION-NONLINEARITY ABLATION of V3-256 (EquiVis-256), szary, 1 GPU.
+#
+# Differs from train_equivariant_v3_zs_hn_f256_szary_config.yaml ONLY in:
+#   * encoder.pool_use_act        true -> false   (no NormAct after the stem conv, the
+#                                                  stage-1 entry 1x1, and the two downsamples)
+#   * encoder.use_hyperkernel_act  (new) false    (no NormAct after the encoder hyperkernel)
+#   * checkpoints_dir / run_name / tags
+# This removes the five encoder nonlinearities that the base ImmuVis encoder does not
+# have (its stem, downsamples and hyperkernel are conv + LayerNorm only). The 13
+# in-block NormAct + gate pairs, PixelLN at every transition, the decoder (its own
+# NormActs included), the hyperkernel, readout, recipe and data are unchanged.
+# Pre-registered reading: configs/README_f256_noact.md.
+#
+model_type: fully_equivariant_v3
+
+encoder:
+    ma_layers_blocks: [1]
+    ma_embedding_dims: [16]
+    pm_layers_blocks: [4, 4, 4]
+    pm_embedding_dims: [64, 128, 256]
+    maximum_frequency: 2
+    include_stem: true
+    latent_nonlinearity: "none"
+    use_gating: true
+    use_layerscale: true
+    layerscale_init: 1.0e-6
+    gate_bias_init: 1.0
+    pool_use_act: false        # ablation: no NormAct at stem / stage entries / downsamples
+    use_hyperkernel_act: false # ablation: no NormAct after the encoder hyperkernel
+    use_norm: true
+    # escnn stride-2 parity: keep plain stride-2 (antialiasing off) with an EVEN
+    # internal size (64). Do NOT toggle antialiasing independently of the size.
+    antialiased_downsample: false
+    antialiased_stem: false
+    # Reduced-resolution training: run the escnn core at 64x64 (set null to run at
+    # the native input resolution, e.g. to reproduce/load native-res checkpoints).
+    internal_image_size: 64
+    hyperkernel_config:
+      embedding_dim: 64
+      kernel_size: 1
+      padding: 0
+      stride: 1
+      use_bias: true
+      intertwiner_basis: full
+
+decoder:
+  decoded_field_dim: 128
+  num_outputs: 2
+  in_block_norm: true
+  # anti-collapse knobs (see BLANK_RECON_DIAGNOSIS / the fully-equiv V3 memory):
+  max_freq_schedule: [2, 2, 1]     # keep oriented content through the full-res stage
+  field_dim_schedule: [128, 96, 64]
+  upsample_type: transposed_conv
+  upsample_kernel_size: 4
+  upsample_padding: 1
+  upsample_output_padding: 0
+  norm_act_function: n_softplus    # smooth magnitude gate, no ReLU deadzone
+  post_refine_norm: true           # restore the between-stage EquivariantPixelLN
+  mean_head_bias_init: 0
+  hyperkernel_config:
+    kernel_size: 1
+    padding: 0
+    stride: 1
+    use_bias: true
+    intertwiner_basis: full
+
+# Data configuration
+# panel config with tscratch data paths (the upstream all_panels_config.yaml points
+# at a /raid_encrypted path that does not exist on this cluster).
+panel_config: configs/all_panels_config_szary_zs_hn.yaml
+tokenizer_config: configs/all_markers_tokenizer.yaml
+input_image_size: [128, 128]
+num_workers: 6
+# 2 GPUs (DDP): batch 4 per GPU x accumulation 1 = effective 8. Same 9128 optimizer steps per
+# epoch as the 1-GPU config, so a 'last' checkpoint can move between the two configs.
+batch_size: 4
+
+data_config:
+  # The tscratch data (immuvis_split_patches_onlyarcsinh) is ALREADY arcsinh-
+  # transformed, so preprocessing is disabled to avoid double-applying arcsinh.
+  preprocessing_func: null
+  scaling_func: percentile
+  denoising_func: butterworth
+  normalization_func: null
+  operation_order: [transform, preprocessing, denoising, scaling]
+  file_extension: npy
+  preprocessing_kwargs: {}
+  denoising_kwargs: {}
+  scaling_kwargs: {}
+  normalization_kwargs: {}
+
+# Training configuration
+device: cuda
+lr: 5e-4
+final_lr: 1e-5
+weight_decay: 0.0001
+gradient_accumulation_steps: 1
+epochs: 200
+frac_warmup_steps: 0.1
+min_channels_frac: 0.75
+spatial_masking_ratio: 0.6
+fully_masked_channels_max_frac: 0.5
+mask_patch_size: 8
+from_checkpoint: last
+checkpoints_dir: checkpoints_equiv_zs_hn_f256_noact
+save_checkpoint_freq: 10
+beta: 0.5
+
+# Comet.ml logging configuration.
+# No API key set -> init_experiment falls back to an OFFLINE experiment (logs to a
+# local .zip under COMET_OFFLINE_DIRECTORY); set COMET_API_KEY in the env to go online.
+run_name: equiv-v3-int64-zs-hn-f256-noact
+tags: [equivariant, fully_equivariant_v3, internal64, f256, noact, 1gpu, szary, zeroshot-hn, 200ep]
+comet_project: multiplex-equivariant
+comet_workspace: null
+comet_api_key: null

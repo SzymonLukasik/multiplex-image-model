@@ -651,6 +651,7 @@ class EquivariantMultiplexImageEncoder(nn.Module):
             nonlinearity: str = "norm",
             fourier_N: int = 8,
             ma_grad_checkpoint: bool = False,
+            use_hyperkernel_act: bool = True,
     ):
         """Initialize the Multiplex Image Encoder.
 
@@ -764,8 +765,15 @@ class EquivariantMultiplexImageEncoder(nn.Module):
         else:
             self.ma_to_hk_adapter = None
 
-        # Equivariant nonlinearity on the BL-regular field type
-        self.act = make_act(self.hyperkernel.out_type, nonlinearity, fourier_N)
+        # Equivariant nonlinearity on the BL-regular field type. The base ImmuVis
+        # encoder has only a LayerNorm here (no activation); use_hyperkernel_act=False
+        # removes this activation for the transition-nonlinearity ablation
+        # (configs/README_f256_noact.md), together with pool_use_act=False.
+        self.use_hyperkernel_act = use_hyperkernel_act
+        self.act = (
+            make_act(self.hyperkernel.out_type, nonlinearity, fourier_N)
+            if use_hyperkernel_act else e2nn.IdentityModule(self.hyperkernel.out_type)
+        )
 
         # pan-marker part — receives the hyperkernel's BL-regular field type
         self.pan_marker_encoder = EquivariantConvNeXtEncoder(
